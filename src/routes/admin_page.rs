@@ -57,9 +57,9 @@ th{{font-size:.7rem;text-transform:uppercase;color:#8b949e;letter-spacing:.05em}
 .modal-bg{{position:fixed;inset:0;background:rgba(0,0,0,.7);display:none;align-items:center;justify-content:center;z-index:50;cursor:pointer}}
 .modal-bg.open{{display:flex}}
 .modal-bg .modal{{cursor:auto}}
-.dur-row{{display:flex;gap:.5rem;align-items:stretch}}
-.dur-row input{{flex:1 1 0;min-width:0;width:auto}}
-.dur-row select{{width:auto;flex:0 0 auto;padding:.55rem 2rem .55rem .75rem;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;font-size:.95rem;font-family:inherit;cursor:pointer}}
+.dur-row{{display:grid;grid-template-columns:1fr 7rem;gap:.5rem;align-items:stretch}}
+.dur-row input{{width:100%;min-width:0}}
+.dur-row select{{width:100%;padding:.55rem .75rem;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;font-size:.95rem;font-family:inherit;cursor:pointer}}
 .dur-row select:focus{{outline:none;border-color:#58a6ff}}
 .modal{{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:1.5rem;width:min(560px,92vw);max-height:90vh;overflow:auto}}
 .modal h3{{color:#e6edf3;margin-bottom:1rem;font-size:1.15rem}}
