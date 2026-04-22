@@ -23,6 +23,7 @@ pub fn render_admin_page(base_url: &str) -> String {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0e1525">
+<link rel="icon" type="image/x-icon" href="{base_url}/favicon.ico">
 <title>Referral Code Role — Admin</title>
 <style>
 *{{margin:0;padding:0;box-sizing:border-box}}
@@ -57,8 +58,8 @@ th{{font-size:.7rem;text-transform:uppercase;color:#8b949e;letter-spacing:.05em}
 .modal-bg.open{{display:flex}}
 .modal-bg .modal{{cursor:auto}}
 .dur-row{{display:flex;gap:.5rem;align-items:stretch}}
-.dur-row input{{flex:1;min-width:0}}
-.dur-row select{{padding:.55rem .75rem;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;font-size:.95rem;font-family:inherit;cursor:pointer;flex:0 0 auto}}
+.dur-row input{{flex:1 1 0;min-width:0;width:auto}}
+.dur-row select{{width:auto;flex:0 0 auto;padding:.55rem 2rem .55rem .75rem;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;font-size:.95rem;font-family:inherit;cursor:pointer}}
 .dur-row select:focus{{outline:none;border-color:#58a6ff}}
 .modal{{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:1.5rem;width:min(560px,92vw);max-height:90vh;overflow:auto}}
 .modal h3{{color:#e6edf3;margin-bottom:1rem;font-size:1.15rem}}

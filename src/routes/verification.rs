@@ -178,6 +178,7 @@ pub fn render_verify_page(base_url: &str) -> String {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0e1525">
+<link rel="icon" type="image/x-icon" href="{base_url}/favicon.ico">
 <title>Referral Code Role — Redeem</title>
 <style>
 *{{margin:0;padding:0;box-sizing:border-box}}
