@@ -97,6 +97,10 @@ pub async fn sync_for_player(discord_id: &str, state: &AppState) -> Result<(), A
         match (qualifies, currently) {
             (true, false) => {
                 match rl_client.add_user(guild_id, role_id, discord_id, api_token).await {
+                    Err(AppError::RoleLinkNotFound) => {
+                        delete_orphan_role_link(guild_id, role_id, pool).await;
+                        continue;
+                    }
                     Err(AppError::UserLimitReached { limit }) => {
                         tracing::warn!(guild_id, role_id, discord_id, limit, "User limit reached");
                         continue;
@@ -121,12 +125,19 @@ pub async fn sync_for_player(discord_id: &str, state: &AppState) -> Result<(), A
                 }
             }
             (false, true) => {
-                if let Err(e) = rl_client
+                match rl_client
                     .remove_user(guild_id, role_id, discord_id, api_token)
                     .await
                 {
-                    tracing::error!(guild_id, role_id, discord_id, "remove_user failed: {e}");
-                    continue;
+                    Err(AppError::RoleLinkNotFound) => {
+                        delete_orphan_role_link(guild_id, role_id, pool).await;
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::error!(guild_id, role_id, discord_id, "remove_user failed: {e}");
+                        continue;
+                    }
+                    Ok(_) => {}
                 }
                 if let Err(e) = sqlx::query(
                     "DELETE FROM role_assignments \
@@ -169,9 +180,17 @@ pub async fn sync_for_role_link(
     };
 
     if conditions.0.approved_batch_ids.is_empty() {
-        rl_client
+        match rl_client
             .replace_users_scalable(guild_id, role_id, &[], &api_token)
-            .await?;
+            .await
+        {
+            Ok(_) => {}
+            Err(AppError::RoleLinkNotFound) => {
+                delete_orphan_role_link(guild_id, role_id, pool).await;
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        }
         sqlx::query("DELETE FROM role_assignments WHERE guild_id = $1 AND role_id = $2")
             .bind(guild_id)
             .bind(role_id)
@@ -229,9 +248,17 @@ pub async fn sync_for_role_link(
         "Pushing full user list to Role Link"
     );
 
-    rl_client
+    match rl_client
         .replace_users_scalable(guild_id, role_id, &qualifying, &api_token)
-        .await?;
+        .await
+    {
+        Ok(_) => {}
+        Err(AppError::RoleLinkNotFound) => {
+            delete_orphan_role_link(guild_id, role_id, pool).await;
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    }
 
     // Rebuild the local mirror. For ≤100k users this is one UNNEST; for
     // larger lists we chunk inserts to keep bind-param sizes reasonable.
@@ -257,4 +284,24 @@ pub async fn sync_for_role_link(
     tx.commit().await?;
 
     Ok(())
+}
+
+/// Delete a role_link the RoleLogic API reports as gone (403 Invalid or
+/// revoked token). CASCADE clears role_assignments. Best-effort: logs DB
+/// failures, never propagates them — sync workers must not stop syncing
+/// other links over a cleanup hiccup.
+async fn delete_orphan_role_link(guild_id: &str, role_id: &str, pool: &sqlx::PgPool) {
+    tracing::warn!(
+        guild_id,
+        role_id,
+        "Role link not found on RoleLogic; removing orphaned local row"
+    );
+    if let Err(e) = sqlx::query("DELETE FROM role_links WHERE guild_id = $1 AND role_id = $2")
+        .bind(guild_id)
+        .bind(role_id)
+        .execute(pool)
+        .await
+    {
+        tracing::error!(guild_id, role_id, "Failed to delete orphan role_link: {e}");
+    }
 }
