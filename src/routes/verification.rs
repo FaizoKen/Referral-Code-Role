@@ -221,6 +221,14 @@ h1{{font-size:1.5rem;color:#e6edf3;margin-bottom:.5rem}}
 .btn-join:hover{{background:#4752c4}}
 .btn-check{{background:#21262d;color:#c9d1d9;border:1px solid #30363d;font-size:.85rem;padding:.55rem .9rem;flex:1;min-width:140px}}
 .btn-check:hover{{background:#30363d}}
+.guild-ctx{{display:none;align-items:center;gap:10px;background:#052e16;border:1px solid #14532d;color:#86efac;padding:.65rem .9rem;border-radius:8px;margin-bottom:1rem;font-size:.85rem;line-height:1.4}}
+.guild-ctx.show{{display:flex}}
+.guild-ctx.warn{{background:#1c1208;border-color:#422006;color:#fbbf24}}
+.guild-ctx .gctx-icon{{flex-shrink:0}}
+.guild-ctx .gctx-name{{color:#fff;font-weight:600}}
+.manage-link{{font-size:.78rem;color:#8b949e;text-align:center;margin-top:1rem;line-height:1.5}}
+.manage-link a{{color:#74b9ff;text-decoration:none}}
+.manage-link a:hover{{text-decoration:underline}}
 @media (max-width:480px){{
   body{{align-items:flex-start}}
   .wrap{{padding:1rem;margin:.5rem;padding-top:max(1rem,env(safe-area-inset-top,0));padding-bottom:max(1rem,env(safe-area-inset-bottom,0))}}
@@ -239,6 +247,11 @@ h1{{font-size:1.5rem;color:#e6edf3;margin-bottom:.5rem}}
 <div class="card">
 <h1>Redeem your code</h1>
 <p class="subtitle">Got a code from a campaign, podcast, or event? Enter it below to unlock your Discord role.</p>
+
+<div id="guild-ctx" class="guild-ctx">
+<svg class="gctx-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+<span id="guild-ctx-text"></span>
+</div>
 
 <div id="msg" class="hidden"></div>
 <div id="loading"><span class="spinner"></span> Loading...</div>
@@ -264,6 +277,7 @@ Sign in with Discord
 <button id="redeem-btn" class="btn btn-redeem" onclick="doRedeem()">Claim my role</button>
 <p style="color:#8b949e;font-size:.78rem;margin-top:.85rem;text-align:center">Codes are case-insensitive. Hyphens are ignored.</p>
 <div class="recent" id="recent-wrap"></div>
+<p class="manage-link">Receiving codes for servers you didn't intend? <a href="/auth/my_servers?from=/referral-code-role/verify">Choose which servers receive roles →</a></p>
 </div>
 
 </div>
@@ -271,8 +285,21 @@ Sign in with Discord
 
 <script>
 const BASE = '{base_url}';
+const PLUGIN_SLUG = 'referral-code-role';
 const params = new URLSearchParams(window.location.search);
 const PRESET_CODE = (params.get('code') || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+// Optional ?guild=<id> tells us the user came from a per-guild redeem
+// link an admin shared in their Discord. We use it to (a) show a
+// contextual banner so the user knows which server this is for and
+// (b) automatically clear any existing opt-out (both per-plugin and
+// the guild-wide master) once they're authenticated.
+const guildId = (() => {{
+  try {{
+    const v = new URLSearchParams(window.location.search).get('guild');
+    return v && /^[0-9]{{5,25}}$/.test(v) ? v : '';
+  }} catch (e) {{ return ''; }}
+}})();
 
 function show(id) {{
   ['loading','login','redeem'].forEach(s => document.getElementById(s).classList.add('hidden'));
@@ -297,16 +324,77 @@ async function api(method, path, body) {{
   return data;
 }}
 
+// Gateway-absolute helper for /auth/* (cookie-authed via rl_session).
+async function gatewayApi(method, path, body) {{
+  const opts = {{ method, credentials: 'include', headers: {{}} }};
+  if (body) {{
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }}
+  const res = await fetch(path, opts);
+  const data = await res.json().catch(() => ({{}}));
+  if (!res.ok) throw new Error(data.error || 'Request failed');
+  return data;
+}}
+
+function showGuildCtx(html, isWarning) {{
+  const el = document.getElementById('guild-ctx');
+  document.getElementById('guild-ctx-text').innerHTML = html;
+  el.classList.toggle('warn', !!isWarning);
+  el.classList.add('show');
+}}
+
+// Resolve guildId → display name via the gateway, then clear any
+// opt-out blocking this plugin from assigning roles in that server.
+async function applyGuildContext() {{
+  if (!guildId) return;
+  let prefs;
+  try {{
+    prefs = await gatewayApi('GET', '/auth/preferences');
+  }} catch (e) {{
+    return;
+  }}
+  const g = (prefs.guilds || []).find(x => x.guild_id === guildId);
+  if (!g) {{
+    showGuildCtx("You're not in that server yet — join it on Discord, then refresh.", true);
+    return;
+  }}
+  const safeName = (g.guild_name || '(unnamed server)')
+    .replace(/[&<>"']/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}})[c]);
+  const wasDisabled = g.master_optout || (g.plugin_optouts || []).includes(PLUGIN_SLUG);
+  try {{
+    if (g.master_optout) {{
+      await gatewayApi('POST', '/auth/preferences', {{
+        guild_id: guildId, plugin: null, enabled: true,
+      }});
+    }}
+    if ((g.plugin_optouts || []).includes(PLUGIN_SLUG)) {{
+      await gatewayApi('POST', '/auth/preferences', {{
+        guild_id: guildId, plugin: PLUGIN_SLUG, enabled: true,
+      }});
+    }}
+  }} catch (e) {{}}
+  const nameHtml = '<span class="gctx-name">' + safeName + '</span>';
+  if (wasDisabled) {{
+    showGuildCtx('Enabled Referral Code roles for ' + nameHtml + ' — redeem your code below.');
+  }} else {{
+    showGuildCtx('Redeeming for ' + nameHtml + '.');
+  }}
+}}
+
 document.getElementById('code-input').addEventListener('input', e => {{
   e.target.value = e.target.value.toUpperCase().replace(/[^A-Z0-9-]/g, '');
 }});
 
 document.getElementById('login-btn').addEventListener('click', e => {{
   e.preventDefault();
-  const dest = PRESET_CODE
-    ? BASE + '/verify/login?code=' + encodeURIComponent(PRESET_CODE)
-    : BASE + '/verify/login';
-  window.location.href = dest;
+  // Build the return_to so the guild context survives the Discord
+  // OAuth round-trip — a returning user lands on the same per-guild URL.
+  const qs = [];
+  if (PRESET_CODE) qs.push('code=' + encodeURIComponent(PRESET_CODE));
+  if (guildId) qs.push('guild=' + encodeURIComponent(guildId));
+  const returnTo = '/referral-code-role/verify' + (qs.length ? '?' + qs.join('&') : '');
+  window.location.href = '/auth/login?return_to=' + encodeURIComponent(returnTo);
 }});
 
 const ERROR_TEXT = {{
@@ -443,6 +531,8 @@ function applyStatus(s) {{
     renderRecent(s.recent_redemptions || []);
     renderPending(s.pending_redemptions || []);
     startPollingIfPending(s.pending_redemptions || []);
+    // Session is valid — apply per-guild side effects (banner + opt-out clear).
+    applyGuildContext();
   }} else {{
     show('login');
   }}

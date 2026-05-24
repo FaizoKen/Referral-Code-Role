@@ -17,7 +17,7 @@ pub fn build_config_schema(
     base_url: &str,
 ) -> Value {
     let admin_url = format!("{base_url}/admin?guild_id={guild_id}");
-    let redeem_url = format!("{base_url}/verify");
+    let redeem_url = format!("{base_url}/verify?guild={guild_id}");
 
     serde_json::json!({
         "version": 1,
