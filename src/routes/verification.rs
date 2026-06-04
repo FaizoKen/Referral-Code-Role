@@ -350,7 +350,7 @@ async function applyGuildContext() {{
   if (!guildId) return;
   let prefs;
   try {{
-    prefs = await gatewayApi('GET', '/auth/preferences');
+    prefs = await gatewayApi('GET', '/auth/preferences?ensure_guild=' + encodeURIComponent(guildId));
   }} catch (e) {{
     return;
   }}
