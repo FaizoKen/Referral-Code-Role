@@ -13,6 +13,14 @@ const CHUNK_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 /// Because `RoleLinkToken` rows cascade on `RoleLink` delete, getting this
 /// reliably signals the role link has been deleted upstream.
 const RL_LINK_GONE_ERROR_MSG: &str = "Invalid or revoked token";
+/// 409 body marker for a list write held by RoleLogic's shrink gate until an
+/// owner confirms the removals. Source: `RoleLinkService.assertShrinkAllowed`.
+const RL_CONFIRM_REQUIRED: &str = "confirm_required";
+
+/// A 409 for a list write the shrink gate is holding.
+fn removal_held(status: reqwest::StatusCode, body: &str) -> bool {
+    status == reqwest::StatusCode::CONFLICT && body.contains(RL_CONFIRM_REQUIRED)
+}
 
 #[derive(Clone)]
 pub struct RoleLogicClient {
@@ -154,6 +162,9 @@ impl RoleLogicClient {
                 && body.to_lowercase().contains("maximum")
             {
                 return Err(AppError::UserLimitReached { limit: 0 });
+            }
+            if removal_held(status, &body) {
+                return Err(AppError::RemovalHeld);
             }
             return Err(AppError::RoleLogic(format!(
                 "Replace users failed: {status} - {body}"
@@ -322,6 +333,9 @@ impl RoleLogicClient {
             {
                 return Err(AppError::UserLimitReached { limit: 0 });
             }
+            if removal_held(status, &body) {
+                return Err(AppError::RemovalHeld);
+            }
             return Err(AppError::RoleLogic(format!(
                 "Commit upload failed: {status} - {body}"
             )));
@@ -355,5 +369,24 @@ impl RoleLogicClient {
             .await
             .map_err(|e| AppError::RoleLogic(e.to_string()))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::StatusCode;
+
+    // Bodies as RoleLogic sends them (RoleLinkService.assertShrinkAllowed).
+    const HELD: &str = r#"{"errors":{"error":"confirm_required","code":"shrink","change_id":"c","previous":2,"next":0,"removals":2}}"#;
+
+    #[test]
+    fn a_shrink_hold_is_only_a_409_confirm_required() {
+        assert!(removal_held(StatusCode::CONFLICT, HELD));
+        assert!(!removal_held(
+            StatusCode::CONFLICT,
+            r#"{"errors":"Upload already in progress"}"#
+        ));
+        assert!(!removal_held(StatusCode::FORBIDDEN, HELD));
     }
 }
