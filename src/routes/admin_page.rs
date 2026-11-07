@@ -646,8 +646,10 @@ async function loadRedemptions() {{
   }} catch(e) {{ toast(e.message, 'error'); }}
 }}
 
+// Links name this server (as the dashboard's redeem link does), so a code
+// another server also uses still redeems here.
 function codeRedeemUrl(code) {{
-  return BASE + '/verify?code=' + encodeURIComponent(code);
+  return BASE + '/verify?code=' + encodeURIComponent(code) + '&guild=' + encodeURIComponent(GUILD_ID);
 }}
 
 function copyCodeUrl(code) {{
@@ -729,7 +731,7 @@ async function init() {{
 
   showPanel('admin-shell');
 
-  const shareUrl = BASE + '/verify';
+  const shareUrl = BASE + '/verify?guild=' + encodeURIComponent(GUILD_ID);
   document.getElementById('share-url').textContent = shareUrl;
   document.getElementById('share-open').href = shareUrl;
 

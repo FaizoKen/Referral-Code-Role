@@ -32,15 +32,25 @@ pub async fn verify_page(State(state): State<Arc<AppState>>) -> Response {
 #[derive(Deserialize)]
 pub struct LoginQuery {
     pub code: Option<String>,
+    pub guild: Option<String>,
 }
 
 pub async fn login(Query(q): Query<LoginQuery>) -> Result<Redirect, AppError> {
-    let return_to = match q.code {
-        Some(c) if !c.is_empty() => format!(
-            "/referral-code-role/verify?code={}",
-            urlencoding::encode(&c)
-        ),
-        _ => "/referral-code-role/verify".to_string(),
+    let mut qs = Vec::new();
+    if let Some(c) = q.code.filter(|c| !c.is_empty()) {
+        qs.push(format!("code={}", urlencoding::encode(&c)));
+    }
+    // Keep the server a link named, as the page's own login button does.
+    if let Some(g) = q
+        .guild
+        .filter(|g| (5..=25).contains(&g.len()) && g.bytes().all(|b| b.is_ascii_digit()))
+    {
+        qs.push(format!("guild={g}"));
+    }
+    let return_to = if qs.is_empty() {
+        "/referral-code-role/verify".to_string()
+    } else {
+        format!("/referral-code-role/verify?{}", qs.join("&"))
     };
     let url = format!("/auth/login?return_to={}", urlencoding::encode(&return_to));
     Ok(Redirect::temporary(&url))
@@ -405,6 +415,7 @@ const ERROR_TEXT = {{
   exhausted: 'This code campaign has hit its redemption limit.',
   already_used: 'Looks like that code has already been claimed by someone else.',
   already_redeemed_by_you: 'You\'ve already redeemed this code — your role is set.',
+  ambiguous_code: 'More than one server uses this code. Open the redeem link from the server that gave it to you, or join that server on Discord first and try again.',
 }};
 
 async function doRedeem() {{
@@ -413,7 +424,9 @@ async function doRedeem() {{
   const btn = document.getElementById('redeem-btn');
   btn.disabled = true; btn.textContent = 'Working...';
   try {{
-    const r = await api('POST', '/verify/redeem', {{ code: raw }});
+    // guildId (from a server's link) picks that server's code when two
+    // servers both use the same one.
+    const r = await api('POST', '/verify/redeem', {{ code: raw, guild_id: guildId || undefined }});
     if (r.success) {{
       const groupBit = r.batch_name ? ' from "' + r.batch_name + '"' : '';
       const note = r.pending

@@ -544,10 +544,12 @@ pub async fn code_qr(
         .fetch_one(&state.pool)
         .await?;
 
+    // Name the server, so a code another server also uses redeems here.
     let target = format!(
-        "{}/verify?code={}",
+        "{}/verify?code={}&guild={}",
         state.config.base_url,
-        urlencoding::encode(&code)
+        urlencoding::encode(&code),
+        urlencoding::encode(&q.guild_id)
     );
     let svg = qr::render_svg(&target)?;
     Ok((
