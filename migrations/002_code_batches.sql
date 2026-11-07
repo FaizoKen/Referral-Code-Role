@@ -24,5 +24,4 @@ CREATE TABLE IF NOT EXISTS codes (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (batch_id, code)
 );
-CREATE INDEX IF NOT EXISTS idx_codes_lookup ON codes (code);
 CREATE INDEX IF NOT EXISTS idx_codes_batch ON codes (batch_id);

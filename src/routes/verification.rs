@@ -287,7 +287,9 @@ Sign in with Discord
 const BASE = '{base_url}';
 const PLUGIN_SLUG = 'referral-code-role';
 const params = new URLSearchParams(window.location.search);
-const PRESET_CODE = (params.get('code') || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+// Keep hyphens so a link fills in the code as it was printed; the server
+// ignores them when matching.
+const PRESET_CODE = (params.get('code') || '').toUpperCase().replace(/[^A-Z0-9-]/g, '');
 
 // Optional ?guild=<id> tells us the user came from a per-guild redeem
 // link an admin shared in their Discord. We use it to (a) show a

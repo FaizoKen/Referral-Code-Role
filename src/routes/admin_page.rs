@@ -260,11 +260,11 @@ Sign in with Discord
 <div class="field"><label>Code length</label><input id="g-length" type="number" min="6" max="20" value="12">
 <div class="help">Longer = harder to guess. 12 is a good default.</div></div>
 
-<div class="field"><label>Prefix (optional)</label><input id="g-prefix" type="text" placeholder="KS-">
-<div class="help">Codes will start with this — e.g. <code>KS-A1B2C3D4E5F6</code>. Helps you tell groups apart at a glance.</div></div>
+<div class="field"><label>Prefix (optional)</label><input id="g-prefix" type="text" placeholder="KS-" maxlength="20">
+<div class="help">Codes will start with this — e.g. <code>KS-7XK2M9QH4PRT</code>. Helps you tell groups apart at a glance. Letters, numbers and hyphens; people can type the code with or without the hyphens.</div></div>
 
-<div class="field"><label>Or — paste your own codes</label><textarea id="g-custom" rows="4" placeholder="PODCODE&#10;LIVESTREAM2026&#10;HALLOWEEN"></textarea>
-<div class="help">One per line. If you fill this in, the settings above are ignored. Letters and digits only — case is normalised.</div></div>
+<div class="field"><label>Or — paste your own codes</label><textarea id="g-custom" rows="4" placeholder="PODCODE&#10;LIVESTREAM2026&#10;TRIAL-30-DAYS"></textarea>
+<div class="help">One per line. If you fill this in, the settings above are ignored. Letters, numbers and hyphens, up to 40 characters. Case and hyphens don't matter when people redeem.</div></div>
 
 <div class="modal-actions">
 <button class="btn" onclick="closeModal('m-gen')">Cancel</button>

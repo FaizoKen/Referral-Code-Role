@@ -91,7 +91,8 @@ pub async fn redeem_code(
         }
     }
 
-    let normalized = code_gen::normalize_code(&body.code);
+    // Hyphens, spaces and case don't matter: codes match on their key.
+    let normalized = code_gen::code_key(&body.code);
     if normalized.is_empty() {
         record_attempt(&state, &discord_id, ip_hash.as_deref(), &normalized, false).await?;
         return Ok(Json(json!({"error": "invalid"})));
@@ -120,7 +121,7 @@ pub async fn redeem_code(
                 b.guild_id, b.kind, b.max_redemptions_per_code, b.max_redemptions_total, \
                 b.expires_at, b.revoked_at, b.name, b.invite_url, b.role_duration_hours \
          FROM codes c JOIN code_batches b ON b.id = c.batch_id \
-         WHERE UPPER(c.code) = $1 AND b.revoked_at IS NULL",
+         WHERE c.code_key = $1 AND b.revoked_at IS NULL",
     )
     .bind(&normalized)
     .fetch_all(&state.pool)

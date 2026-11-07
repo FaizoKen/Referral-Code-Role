@@ -378,25 +378,48 @@ pub async fn generate_codes(
 
     let mut inserted: Vec<String> = Vec::new();
 
+    // ON CONFLICT covers both unique indexes: the stored text, and the code
+    // key (a code that differs from one already in the group only by hyphens
+    // is the same code, so it is skipped rather than stored twice).
     if let Some(custom) = body.custom_codes {
-        for raw in custom {
-            let normalized = code_gen::normalize_code(&raw);
-            if normalized.is_empty() {
-                continue;
+        // Check every line before writing any, so a bad paste adds nothing.
+        let mut codes = Vec::with_capacity(custom.len());
+        let mut problems = Vec::new();
+        for raw in &custom {
+            match code_gen::custom_code(raw) {
+                Ok(Some(code)) => codes.push(code),
+                Ok(None) => {}
+                Err(e) => problems.push(e),
             }
-            let res = sqlx::query("INSERT INTO codes (batch_id, code) VALUES ($1, $2) ON CONFLICT DO NOTHING")
-                .bind(batch_id)
-                .bind(&normalized)
-                .execute(&state.pool)
-                .await?;
+        }
+        if !problems.is_empty() {
+            let more = problems.len().saturating_sub(3);
+            let mut msg = problems.into_iter().take(3).collect::<Vec<_>>().join(" ");
+            if more > 0 {
+                msg.push_str(&format!(" (and {more} more)"));
+            }
+            return Err(AppError::BadRequest(msg));
+        }
+        for code in codes {
+            let res = sqlx::query(
+                "INSERT INTO codes (batch_id, code) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            )
+            .bind(batch_id)
+            .bind(&code)
+            .execute(&state.pool)
+            .await?;
             if res.rows_affected() > 0 {
-                inserted.push(normalized);
+                inserted.push(code);
             }
         }
     } else {
         let count = body.count.unwrap_or(0).clamp(0, 1000) as usize;
         let length = body.length.unwrap_or(12).clamp(6, 20) as usize;
-        let prefix = body.prefix.as_deref();
+        let prefix = match body.prefix.as_deref() {
+            Some(raw) => code_gen::prefix(raw).map_err(AppError::BadRequest)?,
+            None => None,
+        };
+        let prefix = prefix.as_deref();
 
         for _ in 0..count {
             let mut attempts = 0;
@@ -446,11 +469,12 @@ pub async fn list_codes(
     let page = q.page.unwrap_or(1).max(1);
     let page_size = q.page_size.unwrap_or(50).clamp(1, 500);
     let offset = (page - 1) * page_size;
-    let search = q.q.unwrap_or_default();
+    // Search the way codes redeem: "LAT7XK" finds "LAT-7XK2M9QH4PRT".
+    let search = code_gen::code_key(&q.q.unwrap_or_default());
 
     let rows = sqlx::query_as::<_, (i64, String, i32, Option<DateTime<Utc>>, DateTime<Utc>)>(
         "SELECT id, code, uses_count, revoked_at, created_at FROM codes \
-         WHERE batch_id = $1 AND ($2 = '' OR code ILIKE '%' || $2 || '%') \
+         WHERE batch_id = $1 AND ($2 = '' OR code_key LIKE '%' || $2 || '%') \
          ORDER BY created_at DESC LIMIT $3 OFFSET $4",
     )
     .bind(batch_id)
@@ -461,7 +485,7 @@ pub async fn list_codes(
     .await?;
 
     let total: i64 = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM codes WHERE batch_id = $1 AND ($2 = '' OR code ILIKE '%' || $2 || '%')",
+        "SELECT COUNT(*) FROM codes WHERE batch_id = $1 AND ($2 = '' OR code_key LIKE '%' || $2 || '%')",
     )
     .bind(batch_id)
     .bind(&search)
