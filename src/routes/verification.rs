@@ -181,6 +181,8 @@ pub async fn logout(jar: CookieJar) -> Result<(CookieJar, Json<Value>), AppError
 }
 
 pub fn render_verify_page(base_url: &str) -> String {
+    // The redeem box fits every code a manager can create, hyphens included.
+    let max_code_len = crate::services::code_gen::MAX_CODE_LEN;
     format!(
         r##"<!DOCTYPE html>
 <html lang="en">
@@ -282,7 +284,7 @@ Sign in with Discord
 </div>
 <div id="pending-wrap"></div>
 <div class="label">Enter your code</div>
-<input id="code-input" class="code-input" type="text" placeholder="ABC123" autocomplete="off" maxlength="40" inputmode="text" autocapitalize="characters" spellcheck="false">
+<input id="code-input" class="code-input" type="text" placeholder="ABC123" autocomplete="off" maxlength="{max_code_len}" inputmode="text" autocapitalize="characters" spellcheck="false">
 <div style="height:.85rem"></div>
 <button id="redeem-btn" class="btn btn-redeem" onclick="doRedeem()">Claim my role</button>
 <p style="color:#8b949e;font-size:.78rem;margin-top:.85rem;text-align:center">Codes are case-insensitive. Hyphens are ignored.</p>

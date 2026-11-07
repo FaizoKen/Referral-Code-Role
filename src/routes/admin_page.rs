@@ -16,6 +16,8 @@ pub async fn admin_page(State(state): State<Arc<AppState>>) -> Response {
 }
 
 pub fn render_admin_page(base_url: &str) -> String {
+    use crate::services::code_gen::{MAX_BODY_LEN, MAX_CODE_LEN, MAX_PREFIX_LEN};
+    let (max_body_len, max_code_len, max_prefix_len) = (MAX_BODY_LEN, MAX_CODE_LEN, MAX_PREFIX_LEN);
     format!(
         r##"<!DOCTYPE html>
 <html lang="en">
@@ -257,14 +259,24 @@ Sign in with Discord
 <div class="field"><label>How many codes?</label><input id="g-count" type="number" min="1" max="1000" value="10">
 <div class="help">Up to 1000 at a time.</div></div>
 
-<div class="field"><label>Code length</label><input id="g-length" type="number" min="6" max="20" value="12">
-<div class="help">Longer = harder to guess. 12 is a good default.</div></div>
+<div class="field"><label>Code length</label><input id="g-length" type="number" min="6" max="{max_body_len}" value="12">
+<div class="help">Longer = harder to guess. 12 is a good default. Counts the random part only.</div></div>
 
-<div class="field"><label>Prefix (optional)</label><input id="g-prefix" type="text" placeholder="KS-" maxlength="20">
-<div class="help">Codes will start with this — e.g. <code>KS-7XK2M9QH4PRT</code>. Helps you tell groups apart at a glance. Letters, numbers and hyphens; people can type the code with or without the hyphens.</div></div>
+<div class="field"><label>Prefix (optional)</label><input id="g-prefix" type="text" placeholder="KS-" maxlength="{max_prefix_len}">
+<div class="help">Codes will start with this. Helps you tell groups apart at a glance. Letters, numbers and hyphens.</div></div>
+
+<div class="field"><label>Hyphens</label><select id="g-group">
+<option value="0">None</option>
+<option value="4">Every 4 characters</option>
+<option value="3">Every 3 characters</option>
+<option value="5">Every 5 characters</option>
+</select>
+<div class="help">Blocks are easier to read out and copy. People can still type the code without the hyphens.</div></div>
+
+<div class="field"><label>Your codes will look like</label><div><span class="code-mono" id="g-preview"></span></div></div>
 
 <div class="field"><label>Or — paste your own codes</label><textarea id="g-custom" rows="4" placeholder="PODCODE&#10;LIVESTREAM2026&#10;TRIAL-30-DAYS"></textarea>
-<div class="help">One per line. If you fill this in, the settings above are ignored. Letters, numbers and hyphens, up to 40 characters. Case and hyphens don't matter when people redeem.</div></div>
+<div class="help">One per line. If you fill this in, the settings above are ignored. Letters, numbers and hyphens, up to {max_code_len} characters. Case and hyphens don't matter when people redeem.</div></div>
 
 <div class="modal-actions">
 <button class="btn" onclick="closeModal('m-gen')">Cancel</button>
@@ -481,9 +493,9 @@ async function loadBatches() {{
         + '<td>' + redeemedText + '</td>'
         + '<td>' + fmtTs(b.expires_at) + '</td>'
         + '<td><div class="row-actions">'
-        + '<button class="btn btn-sm btn-primary" onclick="openCodes(' + b.id + ', \'' + escapeAttr(b.name) + '\', \'' + b.kind + '\')">Manage codes</button>'
-        + '<button class="btn btn-sm" onclick="openGenerate(' + b.id + ', \'' + escapeAttr(b.name) + '\', \'' + b.kind + '\')">+ More codes</button>'
-        + '<button class="btn btn-sm btn-danger" onclick="revokeBatch(' + b.id + ', \'' + escapeAttr(b.name) + '\')">Retire</button>'
+        + '<button class="btn btn-sm btn-primary" onclick="openCodes(' + b.id + ', ' + jsArg(b.name) + ', \'' + b.kind + '\')">Manage codes</button>'
+        + '<button class="btn btn-sm" onclick="openGenerate(' + b.id + ', ' + jsArg(b.name) + ', \'' + b.kind + '\')">+ More codes</button>'
+        + '<button class="btn btn-sm btn-danger" onclick="revokeBatch(' + b.id + ', ' + jsArg(b.name) + ')">Retire</button>'
         + '</div></td></tr>';
     }}
     html += '</tbody></table></div>';
@@ -492,7 +504,10 @@ async function loadBatches() {{
 }}
 
 function escapeHtml(s) {{ return String(s ?? '').replace(/[&<>"]/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}})[c]); }}
-function escapeAttr(s) {{ return String(s ?? '').replace(/['\\\\]/g, c => '\\\\' + c); }}
+// A JS string literal for an inline handler: JSON quotes and escapes it,
+// escapeHtml keeps it inside the double-quoted attribute. (This page is a raw
+// string, so a backslash written here reaches the browser as written.)
+function jsArg(s) {{ return escapeHtml(JSON.stringify(String(s ?? ''))); }}
 
 function openCreateBatch() {{
   ['b-name','b-desc','b-mrpc','b-mrt','b-exp','b-invite','b-dur-amount'].forEach(i => document.getElementById(i).value = '');
@@ -546,9 +561,32 @@ function openGenerate(batchId, name, kind) {{
     document.getElementById('g-count').value = '10';
   }}
   document.getElementById('g-length').value = '12';
+  document.getElementById('g-group').value = '0';
+  updateGenPreview();
   document.getElementById('g-tip').innerHTML = GEN_TIP[CURRENT_BATCH.kind] || '';
   openModal('m-gen');
 }}
+
+// Same layout as code_gen::generate_code, with sample characters: blocks of
+// the random part, and a hyphen after a prefix that doesn't end in one.
+const PREVIEW_BODY = '7XK2M9QH4PRTBW5CND6F';
+function updateGenPreview() {{
+  const len = Math.min({max_body_len}, Math.max(6, parseInt(document.getElementById('g-length').value, 10) || 12));
+  const group = parseInt(document.getElementById('g-group').value, 10) || 0;
+  let prefix = document.getElementById('g-prefix').value.split(' ').join('').toUpperCase();
+  let body = PREVIEW_BODY.slice(0, len);
+  if (group) {{
+    const parts = [];
+    for (let i = 0; i < body.length; i += group) parts.push(body.slice(i, i + group));
+    body = parts.join('-');
+    if (prefix && !prefix.endsWith('-')) prefix += '-';
+  }}
+  document.getElementById('g-preview').textContent = prefix + body;
+}}
+['g-length', 'g-prefix', 'g-group'].forEach(id => {{
+  document.getElementById(id).addEventListener('input', updateGenPreview);
+  document.getElementById(id).addEventListener('change', updateGenPreview);
+}});
 
 function openGenerateForCurrent() {{
   if (!CURRENT_BATCH) return;
@@ -561,12 +599,14 @@ async function submitGenerate() {{
   const customRaw = document.getElementById('g-custom').value.trim();
   const body = {{}};
   if (customRaw) {{
-    body.custom_codes = customRaw.split(/\\r?\\n/).map(s => s.trim()).filter(Boolean);
+    body.custom_codes = customRaw.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
   }} else {{
     body.count = parseInt(document.getElementById('g-count').value, 10) || 0;
     body.length = parseInt(document.getElementById('g-length').value, 10) || 12;
     const p = document.getElementById('g-prefix').value.trim();
     if (p) body.prefix = p;
+    const group = parseInt(document.getElementById('g-group').value, 10) || 0;
+    if (group) body.group = group;
   }}
   try {{
     const r = await api('POST', '/admin/api/batches/' + CURRENT_BATCH.id + '/codes', body);
@@ -617,8 +657,8 @@ async function loadCodes() {{
         + '<td>' + c.uses_count + '×</td>'
         + '<td>' + (c.revoked_at ? '<span class="badge">retired</span>' : '<span class="badge badge-uu">active</span>') + '</td>'
         + '<td><div class="row-actions">'
-        + '<button class="btn btn-sm" onclick="copyCodeUrl(\'' + escapeAttr(c.code) + '\')">Copy URL</button>'
-        + '<button class="btn btn-sm" onclick="downloadQr(' + c.id + ', \'' + escapeAttr(c.code) + '\')">QR</button>'
+        + '<button class="btn btn-sm" onclick="copyCodeUrl(' + jsArg(c.code) + ')">Copy URL</button>'
+        + '<button class="btn btn-sm" onclick="downloadQr(' + c.id + ', ' + jsArg(c.code) + ')">QR</button>'
         + (c.revoked_at ? '' : '<button class="btn btn-sm btn-danger" onclick="revokeCode(' + c.id + ')">Retire</button>')
         + '</div></td></tr>';
     }}

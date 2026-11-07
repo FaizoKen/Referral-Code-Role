@@ -4,11 +4,17 @@ use rand::thread_rng;
 // No 0/O/1/I/L — avoid handwriting / QR confusion.
 const CHARSET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 
-/// Longest code a manager can create. It is the redeem box's `maxlength`
-/// (verification.rs), so every code we store can also be typed in full.
-pub const MAX_CODE_LEN: usize = 40;
-/// Prefix cap: the longest generated body (20) plus this fills `MAX_CODE_LEN`.
+/// Longest code a manager can create. Both pages render it: it is the redeem
+/// box's `maxlength`, so every code we store can also be typed in full.
+/// The longest generated code is a 20-character prefix, a joining hyphen and
+/// 20 random characters in blocks of 3 (26 with hyphens): 47.
+pub const MAX_CODE_LEN: usize = 48;
 pub const MAX_PREFIX_LEN: usize = 20;
+/// Longest random part the generate form allows.
+pub const MAX_BODY_LEN: usize = 20;
+/// Block sizes the generate form offers: a hyphen after every N random
+/// characters, e.g. 4 gives 7XK2-M9QH-4PRT.
+pub const GROUP_SIZES: [usize; 3] = [3, 4, 5];
 
 /// The part of a code that identifies it: ASCII letters (upper-cased) and
 /// digits, nothing else. Hyphens, spaces and any other separator are display
@@ -78,15 +84,38 @@ pub fn prefix(raw: &str) -> Result<Option<String>, String> {
     Ok(Some(p))
 }
 
-/// `prefix` must already have been through [`prefix()`].
-pub fn generate_code(length: usize, prefix: Option<&str>) -> String {
+/// The form's hyphen choice: `None` for no blocks, or one of [`GROUP_SIZES`].
+pub fn group_size(raw: Option<u32>) -> Result<Option<usize>, String> {
+    match raw {
+        None | Some(0) => Ok(None),
+        Some(n) if GROUP_SIZES.contains(&(n as usize)) => Ok(Some(n as usize)),
+        Some(n) => Err(format!(
+            "Hyphens can go every 3, 4 or 5 characters, not every {n}."
+        )),
+    }
+}
+
+/// `prefix` must already have been through [`prefix()`] and `group` through
+/// [`group_size()`]. With blocks, a prefix that doesn't end in a hyphen gets
+/// one, so "LAT" reads LAT-7XK2-M9QH-4PRT rather than LAT7XK2-M9QH-4PRT.
+pub fn generate_code(length: usize, prefix: Option<&str>, group: Option<usize>) -> String {
     let length = length.clamp(4, 32);
     let mut rng = thread_rng();
     let body: String = (0..length)
         .map(|_| *CHARSET.choose(&mut rng).unwrap() as char)
         .collect();
+    let body = match group {
+        Some(n) => body
+            .as_bytes()
+            .chunks(n.max(1))
+            .map(|c| std::str::from_utf8(c).expect("CHARSET is ASCII"))
+            .collect::<Vec<_>>()
+            .join("-"),
+        None => body,
+    };
 
     match prefix {
+        Some(p) if group.is_some() && !p.ends_with('-') => format!("{p}-{body}"),
         Some(p) => format!("{p}{body}"),
         None => body,
     }
@@ -115,7 +144,7 @@ mod tests {
     #[test]
     fn a_prefixed_code_redeems_however_it_is_typed() {
         let p = prefix("lat-").unwrap();
-        let code = generate_code(12, p.as_deref());
+        let code = generate_code(12, p.as_deref(), Some(4));
         assert!(code.starts_with("LAT-"), "{code}");
         let key = code_key(&code);
         assert_eq!(code_key(&code.to_lowercase()), key);
@@ -150,9 +179,62 @@ mod tests {
         assert!(custom_code(&"A".repeat(MAX_CODE_LEN + 1)).is_err());
     }
 
+    /// "XXXX-XXXX-XX" -> [4, 4, 2], with every character from CHARSET.
+    fn blocks(body: &str) -> Vec<usize> {
+        body.split('-')
+            .inspect(|b| assert!(b.bytes().all(|c| CHARSET.contains(&c)), "{body}"))
+            .map(str::len)
+            .collect()
+    }
+
+    #[test]
+    fn blocks_split_the_random_part() {
+        assert_eq!(blocks(&generate_code(12, None, Some(4))), [4, 4, 4]);
+        assert_eq!(blocks(&generate_code(10, None, Some(4))), [4, 4, 2]);
+        assert_eq!(blocks(&generate_code(12, None, Some(3))), [3, 3, 3, 3]);
+        assert_eq!(blocks(&generate_code(12, None, None)), [12]);
+    }
+
+    #[test]
+    fn blocks_join_the_prefix_with_one_hyphen() {
+        for raw in ["LAT", "LAT-"] {
+            let p = prefix(raw).unwrap();
+            let code = generate_code(8, p.as_deref(), Some(4));
+            assert!(
+                code.starts_with("LAT-") && !code.starts_with("LAT--"),
+                "{code}"
+            );
+            assert_eq!(blocks(&code["LAT-".len()..]), [4, 4]);
+            // The hyphens are display: the key is the prefix and 8 characters.
+            assert_eq!(code_key(&code).len(), 3 + 8);
+        }
+        // Without blocks the prefix is used exactly as typed.
+        let p = prefix("LAT").unwrap();
+        assert_eq!(code_key(&generate_code(8, p.as_deref(), None)).len(), 11);
+        assert!(!generate_code(8, p.as_deref(), None).contains('-'));
+    }
+
+    #[test]
+    fn group_size_accepts_only_the_offered_sizes() {
+        assert_eq!(group_size(None), Ok(None));
+        assert_eq!(group_size(Some(0)), Ok(None));
+        for n in GROUP_SIZES {
+            assert_eq!(group_size(Some(n as u32)), Ok(Some(n)));
+        }
+        assert!(group_size(Some(1)).is_err());
+        assert!(group_size(Some(6)).is_err());
+    }
+
     #[test]
     fn longest_generated_code_fits_the_redeem_box() {
         let p = prefix(&"A".repeat(MAX_PREFIX_LEN)).unwrap();
-        assert!(generate_code(20, p.as_deref()).len() <= MAX_CODE_LEN);
+        for group in [None, Some(3), Some(4), Some(5)] {
+            let code = generate_code(MAX_BODY_LEN, p.as_deref(), group);
+            assert!(
+                code.len() <= MAX_CODE_LEN,
+                "{} > {MAX_CODE_LEN}: {code}",
+                code.len()
+            );
+        }
     }
 }

@@ -363,6 +363,8 @@ pub struct GenerateCodesBody {
     pub count: Option<i32>,
     pub length: Option<i32>,
     pub prefix: Option<String>,
+    /// Hyphen after every N random characters (3, 4 or 5); absent or 0 = none.
+    pub group: Option<u32>,
     pub custom_codes: Option<Vec<String>>,
 }
 
@@ -414,18 +416,22 @@ pub async fn generate_codes(
         }
     } else {
         let count = body.count.unwrap_or(0).clamp(0, 1000) as usize;
-        let length = body.length.unwrap_or(12).clamp(6, 20) as usize;
+        let length = body
+            .length
+            .unwrap_or(12)
+            .clamp(6, code_gen::MAX_BODY_LEN as i32) as usize;
         let prefix = match body.prefix.as_deref() {
             Some(raw) => code_gen::prefix(raw).map_err(AppError::BadRequest)?,
             None => None,
         };
         let prefix = prefix.as_deref();
+        let group = code_gen::group_size(body.group).map_err(AppError::BadRequest)?;
 
         for _ in 0..count {
             let mut attempts = 0;
             loop {
                 attempts += 1;
-                let code = code_gen::generate_code(length, prefix);
+                let code = code_gen::generate_code(length, prefix, group);
                 let res = sqlx::query(
                     "INSERT INTO codes (batch_id, code) VALUES ($1, $2) ON CONFLICT DO NOTHING",
                 )
