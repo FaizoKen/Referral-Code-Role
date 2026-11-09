@@ -119,6 +119,14 @@ th{{font-size:.7rem;text-transform:uppercase;color:#8b949e;letter-spacing:.05em}
 .tip strong{{color:#e6edf3}}
 .share-card{{background:#0d1117;border:1px solid #30363d;border-radius:10px;padding:1rem;margin-bottom:1rem}}
 .share-card .label{{color:#8b949e;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;margin-bottom:.4rem}}
+.warn-line{{color:#d29922;font-size:.78rem;margin-top:.2rem}}
+.toolbar{{display:flex;gap:.5rem;align-items:center;justify-content:space-between;margin-bottom:.75rem}}
+.toolbar .search{{flex:1;max-width:280px;min-width:0;padding:.45rem .7rem;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;font-size:.85rem;font-family:inherit}}
+.toolbar .search:focus{{outline:none;border-color:#58a6ff}}
+.list-foot{{display:flex;align-items:center;justify-content:space-between;gap:.5rem;margin-top:.75rem}}
+.who-name{{color:#e6edf3;font-weight:600}}
+.mono-id{{font-family:'SF Mono',Menlo,Consolas,monospace;font-size:.75rem}}
+.locked-kind{{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap}}
 @media (max-width:640px){{
   .wrap{{padding:1rem .85rem;padding-bottom:env(safe-area-inset-bottom,1rem)}}
   header{{flex-direction:column;align-items:stretch;gap:.85rem;margin-bottom:1.1rem}}
@@ -193,15 +201,17 @@ Sign in with Discord
 
 <div class="modal-bg" id="m-create">
 <div class="modal">
-<h3>New code group</h3>
-<div class="tip"><strong>What's a code group?</strong> A bundle of codes that share the same rules — for example, "Kickstarter Tier 2" might contain 200 unique codes, while "Podcast Episode 47" might be one shared code. You'll generate codes inside the group after creating it.</div>
+<h3 id="b-title">New code group</h3>
+<div class="tip" id="b-tip"><strong>What's a code group?</strong> A bundle of codes that share the same rules — for example, "Kickstarter Tier 2" might contain 200 unique codes, while "Podcast Episode 47" might be one shared code. You'll generate codes inside the group after creating it.</div>
 
 <div class="field"><label>Group name</label><input id="b-name" type="text" placeholder="e.g. Kickstarter Tier 2, Podcast Ep. 47, Comic-Con 2026">
 <div class="help">Just a label so you can find it later.</div></div>
 
 <div class="field"><label>Notes (optional)</label><input id="b-desc" type="text" placeholder="Anything you want to remember about this group"></div>
 
-<div class="field"><label>How will codes be used?</label>
+<div class="field hidden" id="b-kind-locked"><label>Type</label><div class="locked-kind"><span id="b-kind-badge"></span><span class="muted">A group's type can't change once its codes are out.</span></div></div>
+
+<div class="field" id="b-kind-field"><label>How will codes be used?</label>
 <input type="hidden" id="b-kind" value="unique_per_code">
 <div class="kind-picker" id="kind-picker">
 <div class="kind-card selected" data-kind="unique_per_code" onclick="pickKind('unique_per_code')">
@@ -240,13 +250,14 @@ Sign in with Discord
 <option value="weeks">weeks</option>
 </select>
 </div>
-<div class="help">Leave blank for a <strong>permanent</strong> role. Otherwise the role is automatically removed this long after each redemption (e.g. a 24-hour event pass).</div></div>
+<div class="help">Leave blank for a <strong>permanent</strong> role. Otherwise the role is automatically removed this long after each redemption (e.g. a 24-hour event pass).</div>
+<div class="help hidden" id="b-dur-note">A change here applies to codes redeemed from now on. People who already redeemed keep the end time they were given.</div></div>
 
 <input type="hidden" id="b-mrpc">
 
 <div class="modal-actions">
 <button class="btn" onclick="closeModal('m-create')">Cancel</button>
-<button class="btn btn-primary" onclick="submitCreateBatch()">Create group</button>
+<button class="btn btn-primary" id="b-submit" onclick="submitBatchForm()">Create group</button>
 </div>
 </div>
 </div>
@@ -294,8 +305,17 @@ Sign in with Discord
 <div class="tab active" id="tab-codes" onclick="switchTab('codes')">Codes</div>
 <div class="tab" id="tab-redeems" onclick="switchTab('redeems')">Who redeemed</div>
 </div>
-<div id="codes-pane"><div class="empty">Loading...</div></div>
-<div id="redeems-pane" style="display:none"><div class="empty">Loading...</div></div>
+<div id="codes-pane">
+<div id="codes-tools">
+<div class="tip"><strong>Hand these out:</strong> <em>Copy URL</em> copies a link that fills the code in, <em>QR</em> downloads a printable QR code (great for stickers, posters, wristbands), and <em>Download CSV</em> gives you every code with its link, for mail merges and printers.</div>
+<div class="toolbar"><input id="codes-q" class="search" type="search" placeholder="Find a code" autocomplete="off" spellcheck="false"><button class="btn btn-sm" onclick="downloadCsv('codes')">Download CSV</button></div>
+</div>
+<div id="codes-list"><div class="empty">Loading...</div></div>
+</div>
+<div id="redeems-pane" style="display:none">
+<div class="toolbar" id="redeems-tools"><span class="muted" id="redeems-count"></span><button class="btn btn-sm" onclick="downloadCsv('redemptions')">Download CSV</button></div>
+<div id="redeems-list"><div class="empty">Loading...</div></div>
+</div>
 </div>
 
 <div class="toast" id="toast"></div>
@@ -445,7 +465,7 @@ function renderWelcomeBanner(numBatches) {{
     + '<ol>'
     + '<li><strong>Create a code group</strong> — name it after the campaign (e.g. "Kickstarter Tier 2").</li>'
     + '<li><strong>Generate codes</strong> — one click makes 10, 100, or whatever you need. Each code gets a copy-paste URL and a downloadable QR.</li>'
-    + '<li><strong>Approve the group in RoleLogic</strong> — go back to the role config and tick this group. Then anyone who redeems gets the role automatically.</li>'
+    + '<li><strong>Tick the group in RoleLogic</strong> — back in the role\'s settings, tick this group and click Save. Then anyone who redeems gets the role automatically.</li>'
     + '</ol>'
     + '<div class="actions"><button class="btn btn-primary" onclick="openCreateBatch()">+ Create your first group</button></div>'
     + '</div>';
@@ -460,41 +480,65 @@ function formatDuration(hours) {{
   return hours + (hours === 1 ? ' hour' : ' hours');
 }}
 
+// The four numbers at the top: the same labels on the first load and after
+// every change.
+function renderStats(s) {{
+  document.getElementById('stats').innerHTML = [
+    ['Code groups', s.batches], ['Codes', s.codes],
+    ['Redemptions', s.redemptions], ['Last 24 hours', s.redemptions_last_24h]
+  ].map(([l,v]) => '<div class="stat"><div class="v">' + v + '</div><div class="l">' + l + '</div></div>').join('');
+}}
+
 async function loadStats() {{
   try {{
-    const s = await api('GET', '/admin/api/stats');
-    document.getElementById('stats').innerHTML = [
-      ['Code groups', s.batches], ['Codes', s.codes],
-      ['Total redeemed', s.redemptions], ['Redeemed today', s.redemptions_last_24h]
-    ].map(([l,v]) => '<div class="stat"><div class="v">' + v + '</div><div class="l">' + l + '</div></div>').join('');
+    renderStats(await api('GET', '/admin/api/stats'));
   }} catch(e) {{ toast(e.message, 'error'); }}
+}}
+
+let BATCHES = [];
+
+// "Redeemed": against the number of codes for one-time codes (each is one
+// reward), against the cap when there is one, otherwise a plain count — a
+// per-person code is printed on many wristbands, so "of N codes" means nothing.
+function redeemedText(b) {{
+  if (b.kind === 'unique_per_code') {{
+    const pct = b.total_codes > 0 ? Math.round((b.total_redemptions / b.total_codes) * 100) : 0;
+    return b.total_redemptions + ' of ' + b.total_codes + ' (' + pct + '%)';
+  }}
+  if (b.max_redemptions_total) return b.total_redemptions + ' of ' + b.max_redemptions_total + ' max';
+  return String(b.total_redemptions);
+}}
+
+// Whether any role in RoleLogic has this group ticked. Codes from a group
+// nobody ticked still redeem, but give no role.
+function roleLine(b) {{
+  if (b.role_links > 0) return '<div class="muted">Gives ' + b.role_links + (b.role_links === 1 ? ' role' : ' roles') + '</div>';
+  return '<div class="warn-line">Not on a role yet · tick it in RoleLogic</div>';
 }}
 
 async function loadBatches() {{
   try {{
     const r = await api('GET', '/admin/api/batches');
+    BATCHES = r.batches;
     const wrap = document.getElementById('batch-table-wrap');
     renderWelcomeBanner(r.batches.length);
     if (!r.batches.length) {{
       wrap.innerHTML = '<div class="empty">No code groups yet. Click <strong>+ New code group</strong> above to create one.</div>';
       return;
     }}
-    let html = '<div class="tbl-wrap"><table><thead><tr><th>Name</th><th>Type</th><th>Role</th><th>Codes</th><th>Redeemed</th><th>Expires</th><th></th></tr></thead><tbody>';
+    let html = '<div class="tbl-wrap"><table><thead><tr><th>Name</th><th>Type</th><th>Role lasts</th><th>Codes</th><th>Redeemed</th><th>Expires</th><th></th></tr></thead><tbody>';
     for (const b of r.batches) {{
-      const pct = b.total_codes > 0 ? Math.round((b.total_redemptions / Math.max(b.total_codes, 1)) * 100) : 0;
-      const redeemedText = b.kind === 'shared_unlimited'
-        ? b.total_redemptions
-        : b.total_redemptions + ' of ' + b.total_codes + ' (' + pct + '%)';
       html += '<tr>'
-        + '<td><strong>' + escapeHtml(b.name) + '</strong>' + (b.description ? '<div class="muted">' + escapeHtml(b.description) + '</div>' : '') + '</td>'
+        + '<td><strong>' + escapeHtml(b.name) + '</strong>' + (b.description ? '<div class="muted">' + escapeHtml(b.description) + '</div>' : '') + roleLine(b) + '</td>'
         + '<td>' + kindBadge(b.kind) + '</td>'
         + '<td>' + formatDuration(b.role_duration_hours) + '</td>'
         + '<td>' + b.total_codes + '</td>'
-        + '<td>' + redeemedText + '</td>'
+        + '<td>' + redeemedText(b) + '</td>'
         + '<td>' + fmtTs(b.expires_at) + '</td>'
         + '<td><div class="row-actions">'
         + '<button class="btn btn-sm btn-primary" onclick="openCodes(' + b.id + ', ' + jsArg(b.name) + ', \'' + b.kind + '\')">Manage codes</button>'
         + '<button class="btn btn-sm" onclick="openGenerate(' + b.id + ', ' + jsArg(b.name) + ', \'' + b.kind + '\')">+ More codes</button>'
+        + '<button class="btn btn-sm" onclick="openEditBatch(' + b.id + ')">Edit</button>'
         + '<button class="btn btn-sm btn-danger" onclick="revokeBatch(' + b.id + ', ' + jsArg(b.name) + ')">Retire</button>'
         + '</div></td></tr>';
     }}
@@ -509,12 +553,73 @@ function escapeHtml(s) {{ return String(s ?? '').replace(/[&<>"]/g, c => ({{'&':
 // string, so a backslash written here reaches the browser as written.)
 function jsArg(s) {{ return escapeHtml(JSON.stringify(String(s ?? ''))); }}
 
+// The group being edited in the group form, or null when it makes a new one.
+let EDITING = null;
+
+function setGroupFormMode(edit) {{
+  document.getElementById('b-title').textContent = edit ? 'Edit code group' : 'New code group';
+  document.getElementById('b-submit').textContent = edit ? 'Save changes' : 'Create group';
+  ['b-tip', 'b-kind-field'].forEach(id => document.getElementById(id).classList.toggle('hidden', edit));
+  ['b-kind-locked', 'b-dur-note'].forEach(id => document.getElementById(id).classList.toggle('hidden', !edit));
+}}
+
 function openCreateBatch() {{
+  EDITING = null;
   ['b-name','b-desc','b-mrpc','b-mrt','b-exp','b-invite','b-dur-amount'].forEach(i => document.getElementById(i).value = '');
   document.getElementById('b-dur-unit').value = 'days';
   pickKind('unique_per_code');
+  setGroupFormMode(false);
   openModal('m-create');
   setTimeout(() => document.getElementById('b-name').focus(), 50);
+}}
+
+// datetime-local wants the browser's local time, without seconds.
+function toLocalInput(iso) {{
+  if (!iso) return '';
+  const d = new Date(iso);
+  const p = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + 'T' + p(d.getHours()) + ':' + p(d.getMinutes());
+}}
+
+function openEditBatch(id) {{
+  const b = BATCHES.find(x => x.id === id);
+  if (!b) return;
+  EDITING = b;
+  document.getElementById('b-name').value = b.name;
+  document.getElementById('b-desc').value = b.description || '';
+  document.getElementById('b-mrt').value = b.max_redemptions_total || '';
+  document.getElementById('b-exp').value = toLocalInput(b.expires_at);
+  document.getElementById('b-invite').value = b.invite_url || '';
+  const h = b.role_duration_hours || 0;
+  const [amount, unit] = !h ? ['', 'days'] : h % 168 === 0 ? [h / 168, 'weeks'] : h % 24 === 0 ? [h / 24, 'days'] : [h, 'hours'];
+  document.getElementById('b-dur-amount').value = amount;
+  document.getElementById('b-dur-unit').value = unit;
+  pickKind(b.kind);
+  document.getElementById('b-kind-badge').innerHTML = kindBadge(b.kind);
+  setGroupFormMode(true);
+  openModal('m-create');
+}}
+
+function submitBatchForm() {{
+  return EDITING ? submitEditBatch() : submitCreateBatch();
+}}
+
+async function submitEditBatch() {{
+  const body = {{
+    name: document.getElementById('b-name').value.trim(),
+    description: document.getElementById('b-desc').value.trim() || null,
+    max_redemptions_total: parseIntOrNull('b-mrt'),
+    expires_at: parseDateOrNull('b-exp'),
+    invite_url: document.getElementById('b-invite').value.trim() || null,
+    role_duration_hours: readDurationHours(),
+  }};
+  if (!body.name) {{ toast('Give the group a name first', 'error'); return; }}
+  try {{
+    await api('PATCH', '/admin/api/batches/' + EDITING.id, body);
+    closeModal('m-create');
+    toast('Group updated', 'success');
+    await loadBatches(); await loadStats();
+  }} catch(e) {{ toast(e.message, 'error'); }}
 }}
 
 function readDurationHours() {{
@@ -629,9 +734,27 @@ async function revokeBatch(id, name) {{
 async function openCodes(batchId, name, kind) {{
   CURRENT_BATCH = {{ id: batchId, name, kind: kind || 'unique_per_code' }};
   document.getElementById('d-codes-title').textContent = name;
+  document.getElementById('codes-q').value = '';
+  CODES.q = '';
   switchTab('codes');
   openDrawer('d-codes');
   await loadCodes();
+}}
+
+// The drawer's lists load 50 rows at a time; "Show more" adds the next 50.
+const PAGE_SIZE = 50;
+const CODES = {{ q: '', page: 1, items: [], total: 0 }};
+const REDEEMS = {{ page: 1, items: [], total: 0 }};
+
+let SEARCH_TIMER = null;
+document.getElementById('codes-q').addEventListener('input', e => {{
+  clearTimeout(SEARCH_TIMER);
+  SEARCH_TIMER = setTimeout(() => {{ CODES.q = e.target.value.trim(); loadCodes(); }}, 250);
+}});
+
+function moreRow(shown, total, what, fn) {{
+  if (shown >= total) return total > PAGE_SIZE ? '<div class="list-foot"><span class="muted">All ' + total + ' ' + what + '</span></div>' : '';
+  return '<div class="list-foot"><span class="muted">Showing ' + shown + ' of ' + total + ' ' + what + '</span><button class="btn btn-sm" onclick="' + fn + '">Show more</button></div>';
 }}
 
 function switchTab(which) {{
@@ -642,47 +765,107 @@ function switchTab(which) {{
   if (which === 'redeems') loadRedemptions();
 }}
 
-async function loadCodes() {{
+async function loadCodes(more) {{
+  if (!CURRENT_BATCH) return;
+  const batchId = CURRENT_BATCH.id;
+  if (!more) {{ CODES.page = 1; CODES.items = []; }}
   try {{
-    const r = await api('GET', '/admin/api/batches/' + CURRENT_BATCH.id + '/codes');
-    const pane = document.getElementById('codes-pane');
-    if (!r.codes.length) {{
-      pane.innerHTML = '<div class="empty">No codes in this group yet. Click <strong>+ Generate</strong> at the top to add some.</div>';
-      return;
-    }}
-    const tip = '<div class="tip"><strong>Hand these out:</strong> click <em>Copy URL</em> to copy a clickable redemption link, or <em>QR</em> to download a printable QR code (great for stickers, posters, wristbands).</div>';
-    let html = tip + '<div class="tbl-wrap"><table><thead><tr><th>Code</th><th>Used</th><th>Status</th><th></th></tr></thead><tbody>';
-    for (const c of r.codes) {{
-      html += '<tr><td><span class="code-mono">' + escapeHtml(c.code) + '</span></td>'
-        + '<td>' + c.uses_count + '×</td>'
-        + '<td>' + (c.revoked_at ? '<span class="badge">retired</span>' : '<span class="badge badge-uu">active</span>') + '</td>'
-        + '<td><div class="row-actions">'
-        + '<button class="btn btn-sm" onclick="copyCodeUrl(' + jsArg(c.code) + ')">Copy URL</button>'
-        + '<button class="btn btn-sm" onclick="downloadQr(' + c.id + ', ' + jsArg(c.code) + ')">QR</button>'
-        + (c.revoked_at ? '' : '<button class="btn btn-sm btn-danger" onclick="revokeCode(' + c.id + ')">Retire</button>')
-        + '</div></td></tr>';
-    }}
-    html += '</tbody></table></div>';
-    pane.innerHTML = html;
+    const r = await api('GET', '/admin/api/batches/' + batchId + '/codes?page=' + CODES.page + '&page_size=' + PAGE_SIZE
+      + (CODES.q ? '&q=' + encodeURIComponent(CODES.q) : ''));
+    if (!CURRENT_BATCH || CURRENT_BATCH.id !== batchId) return;
+    CODES.items = CODES.items.concat(r.codes);
+    CODES.total = r.total;
+    CODES.page += 1;
+    renderCodes();
   }} catch(e) {{ toast(e.message, 'error'); }}
 }}
 
-async function loadRedemptions() {{
+function renderCodes() {{
+  const list = document.getElementById('codes-list');
+  const none = CODES.total === 0;
+  document.getElementById('codes-tools').classList.toggle('hidden', none && !CODES.q);
+  if (none) {{
+    list.innerHTML = CODES.q
+      ? '<div class="empty">No code in this group matches "' + escapeHtml(CODES.q) + '".</div>'
+      : '<div class="empty">No codes in this group yet. Click <strong>+ Generate</strong> at the top to add some.</div>';
+    return;
+  }}
+  let html = '<div class="tbl-wrap"><table><thead><tr><th>Code</th><th>Used</th><th>Status</th><th></th></tr></thead><tbody>';
+  for (const c of CODES.items) {{
+    html += '<tr><td><span class="code-mono">' + escapeHtml(c.code) + '</span></td>'
+      + '<td>' + c.uses_count + '×</td>'
+      + '<td>' + (c.revoked_at ? '<span class="badge">retired</span>' : '<span class="badge badge-uu">active</span>') + '</td>'
+      + '<td><div class="row-actions">'
+      + '<button class="btn btn-sm" onclick="copyCodeUrl(' + jsArg(c.code) + ')">Copy URL</button>'
+      + '<button class="btn btn-sm" onclick="downloadQr(' + c.id + ', ' + jsArg(c.code) + ')">QR</button>'
+      + (c.revoked_at ? '' : '<button class="btn btn-sm btn-danger" onclick="revokeCode(' + c.id + ')">Retire</button>')
+      + '</div></td></tr>';
+  }}
+  html += '</tbody></table></div>' + moreRow(CODES.items.length, CODES.total, CODES.total === 1 ? 'code' : 'codes', 'loadCodes(true)');
+  list.innerHTML = html;
+}}
+
+async function loadRedemptions(more) {{
+  if (!CURRENT_BATCH) return;
+  const batchId = CURRENT_BATCH.id;
+  if (!more) {{ REDEEMS.page = 1; REDEEMS.items = []; }}
   try {{
-    const r = await api('GET', '/admin/api/batches/' + CURRENT_BATCH.id + '/redemptions');
-    const pane = document.getElementById('redeems-pane');
-    if (!r.redemptions.length) {{
-      pane.innerHTML = '<div class="empty">Nobody has redeemed a code from this group yet.</div>';
-      return;
-    }}
-    let html = '<div class="tbl-wrap"><table><thead><tr><th>When</th><th>Discord ID</th><th>Code used</th></tr></thead><tbody>';
-    for (const x of r.redemptions) {{
-      html += '<tr><td>' + fmtTs(x.redeemed_at) + '</td>'
-        + '<td><span class="code-mono">' + escapeHtml(x.discord_id) + '</span></td>'
-        + '<td><span class="code-mono">' + escapeHtml(x.code) + '</span></td></tr>';
-    }}
-    html += '</tbody></table></div>';
-    pane.innerHTML = html;
+    const r = await api('GET', '/admin/api/batches/' + batchId + '/redemptions?page=' + REDEEMS.page + '&page_size=' + PAGE_SIZE);
+    if (!CURRENT_BATCH || CURRENT_BATCH.id !== batchId) return;
+    REDEEMS.items = REDEEMS.items.concat(r.redemptions);
+    REDEEMS.total = r.total;
+    REDEEMS.page += 1;
+    renderRedemptions();
+  }} catch(e) {{ toast(e.message, 'error'); }}
+}}
+
+function renderRedemptions() {{
+  const list = document.getElementById('redeems-list');
+  const n = REDEEMS.total;
+  document.getElementById('redeems-tools').classList.toggle('hidden', n === 0);
+  document.getElementById('redeems-count').textContent = n + (n === 1 ? ' redemption' : ' redemptions');
+  if (!n) {{
+    list.innerHTML = '<div class="empty">Nobody has redeemed a code from this group yet.</div>';
+    return;
+  }}
+  const now = Date.now();
+  let html = '<div class="tbl-wrap"><table><thead><tr><th>When</th><th>Member</th><th>Code used</th></tr></thead><tbody>';
+  for (const x of REDEEMS.items) {{
+    const who = x.display_name
+      ? '<div class="who-name">' + escapeHtml(x.display_name) + '</div><span class="muted mono-id">' + escapeHtml(x.discord_id) + '</span>'
+      : '<span class="code-mono">' + escapeHtml(x.discord_id) + '</span>';
+    const ends = x.role_expires_at
+      ? '<div class="muted">' + (new Date(x.role_expires_at).getTime() <= now ? 'Role ended ' : 'Role ends ') + fmtTs(x.role_expires_at) + '</div>'
+      : '';
+    const waiting = x.pending ? '<div class="warn-line">Not in the server yet</div>' : '';
+    html += '<tr><td>' + fmtTs(x.redeemed_at) + ends + waiting + '</td>'
+      + '<td>' + who + '</td>'
+      + '<td><span class="code-mono">' + escapeHtml(x.code) + '</span></td></tr>';
+  }}
+  html += '</tbody></table></div>' + moreRow(REDEEMS.items.length, n, 'redemptions', 'loadRedemptions(true)');
+  list.innerHTML = html;
+}}
+
+function saveBlob(blob, filename) {{
+  const objectUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = objectUrl;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+}}
+
+// Every code with its link (or everyone who redeemed), as a spreadsheet.
+async function downloadCsv(kind) {{
+  if (!CURRENT_BATCH) return;
+  try {{
+    const url = BASE + '/admin/api/batches/' + CURRENT_BATCH.id + '/' + kind + '.csv?guild_id=' + encodeURIComponent(GUILD_ID);
+    const res = await fetch(url, {{credentials:'include'}});
+    if (!res.ok) throw new Error('Download failed');
+    const stem = CURRENT_BATCH.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'code-group';
+    saveBlob(await res.blob(), stem + '-' + kind + '.csv');
   }} catch(e) {{ toast(e.message, 'error'); }}
 }}
 
@@ -704,15 +887,7 @@ async function downloadQr(id, code) {{
     const url = BASE + '/admin/api/codes/' + id + '/qr.svg?guild_id=' + encodeURIComponent(GUILD_ID);
     const res = await fetch(url, {{credentials:'include'}});
     if (!res.ok) throw new Error('QR fetch failed');
-    const blob = await res.blob();
-    const objectUrl = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = objectUrl;
-    a.download = 'qr-' + code + '.svg';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    saveBlob(await res.blob(), 'qr-' + code + '.svg');
   }} catch(e) {{ toast(e.message, 'error'); }}
 }}
 
@@ -759,10 +934,7 @@ async function init() {{
     }}
     const stats = await res.json();
     document.getElementById('guild-name').textContent = stats.guild_name || 'Guild ' + GUILD_ID;
-    document.getElementById('stats').innerHTML = [
-      ['Batches', stats.batches], ['Codes', stats.codes],
-      ['Redemptions', stats.redemptions], ['Last 24h', stats.redemptions_last_24h]
-    ].map(([l,v]) => '<div class="stat"><div class="v">' + v + '</div><div class="l">' + l + '</div></div>').join('');
+    renderStats(stats);
   }} catch(e) {{
     showError('Error', e.message, 'Reload');
     document.getElementById('error-action').onclick = (e) => {{ e.preventDefault(); window.location.reload(); }};

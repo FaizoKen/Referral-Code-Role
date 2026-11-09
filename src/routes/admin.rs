@@ -84,7 +84,7 @@ async fn ensure_code_in_guild(
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, sqlx::FromRow)]
 pub struct BatchView {
     pub id: i64,
     pub name: String,
@@ -99,6 +99,10 @@ pub struct BatchView {
     pub role_duration_hours: Option<i32>,
     pub total_codes: i64,
     pub total_redemptions: i64,
+    /// How many of this server's roles have the group ticked in their
+    /// RoleLogic settings. 0: its codes redeem, but give no role yet.
+    pub role_links: i64,
+    #[sqlx(skip)]
     pub remaining: Option<i64>,
 }
 
@@ -109,61 +113,22 @@ pub async fn list_batches(
 ) -> Result<Json<Value>, AppError> {
     require_manager(&state, &jar, &q.guild_id).await?;
 
-    let rows = sqlx::query_as::<
-        _,
-        (
-            i64,
-            String,
-            Option<String>,
-            String,
-            Option<i32>,
-            Option<i32>,
-            Option<DateTime<Utc>>,
-            Option<DateTime<Utc>>,
-            DateTime<Utc>,
-            Option<String>,
-            Option<i32>,
-        ),
-    >(
-        "SELECT id, name, description, kind, max_redemptions_per_code, max_redemptions_total, \
-                expires_at, revoked_at, created_at, invite_url, role_duration_hours \
-         FROM code_batches WHERE guild_id = $1 AND revoked_at IS NULL \
-         ORDER BY created_at DESC",
+    let mut views = sqlx::query_as::<_, BatchView>(
+        "SELECT b.id, b.name, b.description, b.kind, b.max_redemptions_per_code, \
+                b.max_redemptions_total, b.expires_at, b.revoked_at, b.created_at, \
+                b.invite_url, b.role_duration_hours, \
+                (SELECT COUNT(*) FROM codes c WHERE c.batch_id = b.id) AS total_codes, \
+                (SELECT COUNT(*) FROM redemptions r WHERE r.batch_id = b.id) AS total_redemptions, \
+                (SELECT COUNT(*) FROM role_links l WHERE l.guild_id = b.guild_id \
+                    AND l.conditions->'approved_batch_ids' @> jsonb_build_array(b.id)) AS role_links \
+         FROM code_batches b WHERE b.guild_id = $1 AND b.revoked_at IS NULL \
+         ORDER BY b.created_at DESC",
     )
     .bind(&q.guild_id)
     .fetch_all(&state.pool)
     .await?;
-
-    let mut views: Vec<BatchView> = Vec::with_capacity(rows.len());
-    for r in rows {
-        let total_codes: i64 =
-            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM codes WHERE batch_id = $1")
-                .bind(r.0)
-                .fetch_one(&state.pool)
-                .await?;
-        let total_redemptions: i64 =
-            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM redemptions WHERE batch_id = $1")
-                .bind(r.0)
-                .fetch_one(&state.pool)
-                .await?;
-        let remaining = r.5.map(|cap| (cap as i64) - total_redemptions);
-
-        views.push(BatchView {
-            id: r.0,
-            name: r.1,
-            description: r.2,
-            kind: r.3,
-            max_redemptions_per_code: r.4,
-            max_redemptions_total: r.5,
-            expires_at: r.6,
-            revoked_at: r.7,
-            created_at: r.8,
-            invite_url: r.9,
-            role_duration_hours: r.10,
-            total_codes,
-            total_redemptions,
-            remaining,
-        });
+    for v in &mut views {
+        v.remaining = v.max_redemptions_total.map(|cap| cap as i64 - v.total_redemptions);
     }
 
     Ok(Json(json!({ "batches": views })))
@@ -179,6 +144,54 @@ pub struct CreateBatchBody {
     pub expires_at: Option<DateTime<Utc>>,
     pub invite_url: Option<String>,
     pub role_duration_hours: Option<i32>,
+}
+
+/// Longest group name: the dashboard lists groups as options, whose labels
+/// it limits to 100 characters (with room for " (retired)").
+const MAX_NAME_LEN: usize = 80;
+
+fn validate_name(raw: &str) -> Result<String, AppError> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err(AppError::BadRequest("Give the group a name".into()));
+    }
+    if name.chars().count() > MAX_NAME_LEN {
+        return Err(AppError::BadRequest(format!(
+            "Keep the group name to {MAX_NAME_LEN} characters or fewer"
+        )));
+    }
+    Ok(name.to_string())
+}
+
+/// A redemption cap: blank is no cap; 0 or less would stop every redeem.
+fn validate_cap(cap: Option<i32>) -> Result<Option<i32>, AppError> {
+    match cap {
+        Some(n) if n < 1 => Err(AppError::BadRequest(
+            "The redemption limit has to be at least 1 (leave it blank for no limit)".into(),
+        )),
+        other => Ok(other),
+    }
+}
+
+/// A unique-name violation, said in the page's words.
+fn name_taken(e: sqlx::Error) -> AppError {
+    match e {
+        sqlx::Error::Database(db) if db.constraint().is_some() => {
+            AppError::BadRequest("You already have a group with that name".into())
+        }
+        other => AppError::Database(other),
+    }
+}
+
+/// For PATCH bodies: a field left out is `None` (unchanged), a field sent as
+/// `null` is `Some(None)` (cleared). Serde's own `Option<Option<T>>` reads
+/// `null` as `None`, so without this a cleared expiry was silently kept.
+fn double_option<'de, T, D>(de: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Option::<T>::deserialize(de).map(Some)
 }
 
 fn validate_role_duration(hours: Option<i32>) -> Result<Option<i32>, AppError> {
@@ -217,9 +230,12 @@ pub async fn create_batch(
     if !["unique_per_code", "unique_per_user", "shared_unlimited"].contains(&body.kind.as_str()) {
         return Err(AppError::BadRequest("Invalid kind".into()));
     }
-    if body.name.trim().is_empty() {
-        return Err(AppError::BadRequest("Name required".into()));
-    }
+    let name = validate_name(&body.name)?;
+    let max_redemptions_total = validate_cap(body.max_redemptions_total)?;
+    let description = body
+        .description
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty());
 
     let invite_url = normalize_invite_url(body.invite_url)?;
     let role_duration_hours = validate_role_duration(body.role_duration_hours)?;
@@ -232,34 +248,36 @@ pub async fn create_batch(
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id",
     )
     .bind(&q.guild_id)
-    .bind(body.name.trim())
-    .bind(&body.description)
+    .bind(&name)
+    .bind(&description)
     .bind(&body.kind)
     .bind(body.max_redemptions_per_code)
-    .bind(body.max_redemptions_total)
+    .bind(max_redemptions_total)
     .bind(body.expires_at)
     .bind(&admin_id)
     .bind(&invite_url)
     .bind(role_duration_hours)
     .fetch_one(&state.pool)
     .await
-    .map_err(|e| match e {
-        sqlx::Error::Database(db) if db.constraint().is_some() => {
-            AppError::BadRequest("A batch with that name already exists".into())
-        }
-        other => AppError::Database(other),
-    })?;
+    .map_err(name_taken)?;
 
     Ok(Json(json!({ "id": id })))
 }
 
+/// The admin page's Edit form. The group's type can't change: codes were
+/// made, shared and maybe redeemed under it.
 #[derive(Deserialize)]
 pub struct UpdateBatchBody {
     pub name: Option<String>,
-    pub description: Option<String>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub description: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
     pub expires_at: Option<Option<DateTime<Utc>>>,
+    #[serde(default, deserialize_with = "double_option")]
     pub max_redemptions_total: Option<Option<i32>>,
+    #[serde(default, deserialize_with = "double_option")]
     pub invite_url: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
     pub role_duration_hours: Option<Option<i32>>,
 }
 
@@ -273,54 +291,48 @@ pub async fn update_batch(
     require_manager(&state, &jar, &q.guild_id).await?;
     ensure_batch_in_guild(&state, id, &q.guild_id).await?;
 
-    if let Some(name) = body.name {
-        sqlx::query("UPDATE code_batches SET name = $1, updated_at = now() WHERE id = $2")
-            .bind(name.trim())
-            .bind(id)
-            .execute(&state.pool)
-            .await?;
-    }
-    if let Some(desc) = body.description {
-        sqlx::query("UPDATE code_batches SET description = $1, updated_at = now() WHERE id = $2")
-            .bind(desc)
-            .bind(id)
-            .execute(&state.pool)
-            .await?;
-    }
-    if let Some(exp) = body.expires_at {
-        sqlx::query("UPDATE code_batches SET expires_at = $1, updated_at = now() WHERE id = $2")
-            .bind(exp)
-            .bind(id)
-            .execute(&state.pool)
-            .await?;
-    }
-    if let Some(cap) = body.max_redemptions_total {
-        sqlx::query(
-            "UPDATE code_batches SET max_redemptions_total = $1, updated_at = now() WHERE id = $2",
-        )
-        .bind(cap)
-        .bind(id)
-        .execute(&state.pool)
-        .await?;
-    }
-    if let Some(invite) = body.invite_url {
-        let normalized = normalize_invite_url(invite)?;
-        sqlx::query("UPDATE code_batches SET invite_url = $1, updated_at = now() WHERE id = $2")
-            .bind(&normalized)
-            .bind(id)
-            .execute(&state.pool)
-            .await?;
-    }
-    if let Some(dur) = body.role_duration_hours {
-        let normalized = validate_role_duration(dur)?;
-        sqlx::query(
-            "UPDATE code_batches SET role_duration_hours = $1, updated_at = now() WHERE id = $2",
-        )
-        .bind(normalized)
-        .bind(id)
-        .execute(&state.pool)
-        .await?;
-    }
+    // Check everything before writing anything, then write it all at once.
+    let name = body.name.as_deref().map(validate_name).transpose()?;
+    let description = body
+        .description
+        .map(|d| d.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
+    let cap = body.max_redemptions_total.map(validate_cap).transpose()?;
+    let invite = body.invite_url.map(normalize_invite_url).transpose()?;
+    let duration = body
+        .role_duration_hours
+        .map(validate_role_duration)
+        .transpose()?;
+
+    // Each `$n_set` says whether the field was sent; an unsent one keeps
+    // its value. A role duration applies to codes redeemed from now on:
+    // earlier redemptions keep the end time they were given.
+    sqlx::query(
+        "UPDATE code_batches SET \
+            name = CASE WHEN $2 THEN $3 ELSE name END, \
+            description = CASE WHEN $4 THEN $5 ELSE description END, \
+            expires_at = CASE WHEN $6 THEN $7 ELSE expires_at END, \
+            max_redemptions_total = CASE WHEN $8 THEN $9 ELSE max_redemptions_total END, \
+            invite_url = CASE WHEN $10 THEN $11 ELSE invite_url END, \
+            role_duration_hours = CASE WHEN $12 THEN $13 ELSE role_duration_hours END, \
+            updated_at = now() \
+         WHERE id = $1",
+    )
+    .bind(id)
+    .bind(name.is_some())
+    .bind(name.unwrap_or_default())
+    .bind(description.is_some())
+    .bind(description.flatten())
+    .bind(body.expires_at.is_some())
+    .bind(body.expires_at.flatten())
+    .bind(cap.is_some())
+    .bind(cap.flatten())
+    .bind(invite.is_some())
+    .bind(invite.flatten())
+    .bind(duration.is_some())
+    .bind(duration.flatten())
+    .execute(&state.pool)
+    .await
+    .map_err(name_taken)?;
 
     Ok(Json(json!({"success": true})))
 }
@@ -550,13 +562,7 @@ pub async fn code_qr(
         .fetch_one(&state.pool)
         .await?;
 
-    // Name the server, so a code another server also uses redeems here.
-    let target = format!(
-        "{}/verify?code={}&guild={}",
-        state.config.base_url,
-        urlencoding::encode(&code),
-        urlencoding::encode(&q.guild_id)
-    );
+    let target = redeem_link(&state.config.base_url, &code, &q.guild_id);
     let svg = qr::render_svg(&target)?;
     Ok((
         StatusCode::OK,
@@ -579,10 +585,10 @@ pub async fn list_redemptions(
     let page_size = q.page_size.unwrap_or(50).clamp(1, 500);
     let offset = (page - 1) * page_size;
 
-    let rows = sqlx::query_as::<_, (i64, String, String, DateTime<Utc>)>(
-        "SELECT r.id, r.discord_id, c.code, r.redeemed_at \
+    let rows = sqlx::query_as::<_, RedemptionRow>(
+        "SELECT r.id, r.discord_id, r.display_name, c.code, r.redeemed_at, r.role_expires_at, r.pending \
          FROM redemptions r JOIN codes c ON c.id = r.code_id \
-         WHERE r.batch_id = $1 ORDER BY r.redeemed_at DESC LIMIT $2 OFFSET $3",
+         WHERE r.batch_id = $1 ORDER BY r.redeemed_at DESC, r.id DESC LIMIT $2 OFFSET $3",
     )
     .bind(batch_id)
     .bind(page_size)
@@ -598,12 +604,15 @@ pub async fn list_redemptions(
 
     let items: Vec<Value> = rows
         .into_iter()
-        .map(|(id, discord_id, code, redeemed_at)| {
+        .map(|r| {
             json!({
-                "id": id,
-                "discord_id": discord_id,
-                "code": code,
-                "redeemed_at": redeemed_at,
+                "id": r.id,
+                "discord_id": r.discord_id,
+                "display_name": r.display_name,
+                "code": r.code,
+                "redeemed_at": r.redeemed_at,
+                "role_expires_at": r.role_expires_at,
+                "pending": r.pending,
             })
         })
         .collect();
@@ -616,6 +625,196 @@ pub async fn list_redemptions(
     })))
 }
 
+#[derive(sqlx::FromRow)]
+struct RedemptionRow {
+    id: i64,
+    discord_id: String,
+    display_name: Option<String>,
+    code: String,
+    redeemed_at: DateTime<Utc>,
+    role_expires_at: Option<DateTime<Utc>>,
+    pending: bool,
+}
+
+/// One CSV field: quoted when it holds a comma, quote or line break, and
+/// defused when a spreadsheet would read it as a formula (a member's display
+/// name is theirs to choose: "=HYPERLINK(…)" must stay text).
+fn csv_field(raw: &str) -> String {
+    let s = if raw.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+        format!("'{raw}")
+    } else {
+        raw.to_string()
+    };
+    if s.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s
+    }
+}
+
+fn csv_line(fields: &[&str]) -> String {
+    let mut line = fields.iter().map(|f| csv_field(f)).collect::<Vec<_>>().join(",");
+    line.push_str("\r\n");
+    line
+}
+
+/// A download name from a group's name: letters, digits and dashes.
+fn file_stem(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.ends_with('-') && !out.is_empty() {
+            out.push('-');
+        }
+    }
+    let out = out.trim_end_matches('-').to_string();
+    if out.is_empty() {
+        "code-group".into()
+    } else {
+        out
+    }
+}
+
+fn csv_response(stem: &str, suffix: &str, body: String) -> Response {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{stem}-{suffix}.csv\""),
+            ),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+        ],
+        // A BOM, so Excel reads names in any script as UTF-8.
+        format!("\u{feff}{body}"),
+    )
+        .into_response()
+}
+
+async fn batch_name(state: &AppState, batch_id: i64) -> Result<String, AppError> {
+    Ok(sqlx::query_scalar("SELECT name FROM code_batches WHERE id = $1")
+        .bind(batch_id)
+        .fetch_one(&state.pool)
+        .await?)
+}
+
+/// Every code in a group with its own redemption link (the one Copy URL and
+/// the QR carry), for mail-merges and printers: one-time codes come in
+/// hundreds, and the page shows them 50 at a time.
+pub async fn codes_csv(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<GuildQuery>,
+    Path(batch_id): Path<i64>,
+    jar: CookieJar,
+) -> Result<Response, AppError> {
+    require_manager(&state, &jar, &q.guild_id).await?;
+    ensure_batch_in_guild(&state, batch_id, &q.guild_id).await?;
+    let name = batch_name(&state, batch_id).await?;
+
+    let rows = sqlx::query_as::<_, (String, i32, Option<DateTime<Utc>>, DateTime<Utc>)>(
+        "SELECT code, uses_count, revoked_at, created_at FROM codes \
+         WHERE batch_id = $1 ORDER BY created_at, id",
+    )
+    .bind(batch_id)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let mut body = csv_line(&["code", "redeem_link", "times_used", "status", "created_at"]);
+    for (code, uses, revoked_at, created_at) in rows {
+        let link = redeem_link(&state.config.base_url, &code, &q.guild_id);
+        body.push_str(&csv_line(&[
+            &code,
+            &link,
+            &uses.to_string(),
+            if revoked_at.is_some() { "retired" } else { "active" },
+            &created_at.to_rfc3339(),
+        ]));
+    }
+    Ok(csv_response(&file_stem(&name), "codes", body))
+}
+
+/// Who redeemed a group's codes, newest first.
+pub async fn redemptions_csv(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<GuildQuery>,
+    Path(batch_id): Path<i64>,
+    jar: CookieJar,
+) -> Result<Response, AppError> {
+    require_manager(&state, &jar, &q.guild_id).await?;
+    ensure_batch_in_guild(&state, batch_id, &q.guild_id).await?;
+    let name = batch_name(&state, batch_id).await?;
+
+    let rows = sqlx::query_as::<_, RedemptionRow>(
+        "SELECT r.id, r.discord_id, r.display_name, c.code, r.redeemed_at, r.role_expires_at, r.pending \
+         FROM redemptions r JOIN codes c ON c.id = r.code_id \
+         WHERE r.batch_id = $1 ORDER BY r.redeemed_at DESC, r.id DESC",
+    )
+    .bind(batch_id)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let mut body = csv_line(&[
+        "redeemed_at",
+        "discord_name",
+        "discord_id",
+        "code",
+        "role_ends_at",
+        "joined_server",
+    ]);
+    for r in rows {
+        body.push_str(&csv_line(&[
+            &r.redeemed_at.to_rfc3339(),
+            r.display_name.as_deref().unwrap_or(""),
+            &r.discord_id,
+            &r.code,
+            &r.role_expires_at.map(|t| t.to_rfc3339()).unwrap_or_default(),
+            if r.pending { "not yet" } else { "yes" },
+        ]));
+    }
+    Ok(csv_response(&file_stem(&name), "redemptions", body))
+}
+
+/// A code's own redemption link: it fills the code in and names the server,
+/// so a code another server also uses still redeems here.
+fn redeem_link(base_url: &str, code: &str, guild_id: &str) -> String {
+    format!(
+        "{}/verify?code={}&guild={}",
+        base_url,
+        urlencoding::encode(code),
+        urlencoding::encode(guild_id)
+    )
+}
+
+/// How long a server's name is reused before asking the gateway again. The
+/// gateway's answer carries the server's whole member list, so the admin
+/// page (which asks on every load, create and generate) must not ask often.
+const GUILD_NAME_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+async fn guild_name(state: &AppState, guild_id: &str) -> Option<String> {
+    if let Some((name, at)) = state.guild_names.lock().ok()?.get(guild_id).cloned() {
+        if at.elapsed() < GUILD_NAME_TTL {
+            return name;
+        }
+    }
+    let name = auth_gateway::fetch_guild_name(
+        &state.http,
+        &state.config.auth_gateway_url,
+        &state.config.internal_api_key,
+        guild_id,
+    )
+    .await
+    .ok()?;
+    if let Ok(mut cache) = state.guild_names.lock() {
+        if cache.len() > 10_000 {
+            cache.clear();
+        }
+        cache.insert(guild_id.to_string(), (name.clone(), std::time::Instant::now()));
+    }
+    name
+}
+
 pub async fn stats(
     State(state): State<Arc<AppState>>,
     Query(q): Query<GuildQuery>,
@@ -623,14 +822,7 @@ pub async fn stats(
 ) -> Result<Json<Value>, AppError> {
     require_manager(&state, &jar, &q.guild_id).await?;
 
-    let guild_name = auth_gateway::fetch_guild_name(
-        &state.http,
-        &state.config.auth_gateway_url,
-        &state.config.internal_api_key,
-        &q.guild_id,
-    )
-    .await
-    .unwrap_or(None);
+    let guild_name = guild_name(&state, &q.guild_id).await;
 
     let batches: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM code_batches WHERE guild_id = $1 AND revoked_at IS NULL",
@@ -639,9 +831,10 @@ pub async fn stats(
     .fetch_one(&state.pool)
     .await?;
 
+    // Codes in the groups the page lists (a retired group's codes no longer work).
     let total_codes: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM codes c JOIN code_batches b ON b.id = c.batch_id \
-         WHERE b.guild_id = $1",
+         WHERE b.guild_id = $1 AND b.revoked_at IS NULL",
     )
     .bind(&q.guild_id)
     .fetch_one(&state.pool)
@@ -669,3 +862,46 @@ pub async fn stats(
     })))
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn csv_fields_are_quoted_and_formulas_defused() {
+        assert_eq!(csv_field("PP-7XK2-M9QH"), "PP-7XK2-M9QH");
+        assert_eq!(csv_field("Kai, the builder"), "\"Kai, the builder\"");
+        assert_eq!(csv_field("say \"hi\""), "\"say \"\"hi\"\"\"");
+        assert_eq!(csv_field("=HYPERLINK(\"x\")"), "\"'=HYPERLINK(\"\"x\"\")\"");
+        assert_eq!(csv_field("@kai"), "'@kai");
+        assert_eq!(csv_line(&["a", "b"]), "a,b\r\n");
+    }
+
+    #[test]
+    fn download_names_are_plain() {
+        assert_eq!(file_stem("Kickstarter Backers"), "kickstarter-backers");
+        assert_eq!(file_stem("Podcast Ep. 47 (Nov)"), "podcast-ep-47-nov");
+        assert_eq!(file_stem("ポッドキャスト"), "code-group");
+    }
+
+    #[test]
+    fn a_patch_tells_left_out_from_cleared() {
+        let b: UpdateBatchBody = serde_json::from_str(r#"{"expires_at": null, "name": "X"}"#).unwrap();
+        assert_eq!(b.expires_at, Some(None));
+        assert!(b.max_redemptions_total.is_none());
+        assert!(b.invite_url.is_none());
+        let b: UpdateBatchBody = serde_json::from_str(r#"{"max_redemptions_total": 50}"#).unwrap();
+        assert_eq!(b.max_redemptions_total, Some(Some(50)));
+        assert!(b.expires_at.is_none());
+    }
+
+    #[test]
+    fn caps_and_names_are_checked() {
+        assert!(validate_cap(Some(0)).is_err());
+        assert_eq!(validate_cap(None).unwrap(), None);
+        assert_eq!(validate_cap(Some(100)).unwrap(), Some(100));
+        assert!(validate_name("   ").is_err());
+        assert!(validate_name(&"x".repeat(MAX_NAME_LEN + 1)).is_err());
+        assert_eq!(validate_name("  Kickstarter Backers ").unwrap(), "Kickstarter Backers");
+    }
+}

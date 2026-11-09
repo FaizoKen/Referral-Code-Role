@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::error::AppError;
 use crate::models::condition::RoleConditions;
@@ -20,15 +20,20 @@ pub async fn sync_for_player(discord_id: &str, state: &AppState) -> Result<(), A
     let pool = &state.pool;
     let rl_client = &state.rl_client;
 
-    let user_batches: HashSet<i64> = sqlx::query_scalar::<_, i64>(
-        "SELECT DISTINCT batch_id FROM redemptions \
+    // Each server's groups count for that server's roles only, as
+    // sync_for_role_link counts them (it filters on the redemption's guild).
+    let mut user_batches: HashMap<String, HashSet<i64>> = HashMap::new();
+    for (guild_id, batch_id) in sqlx::query_as::<_, (String, i64)>(
+        "SELECT DISTINCT guild_id, batch_id FROM redemptions \
          WHERE discord_id = $1 AND (role_expires_at IS NULL OR role_expires_at > now())",
     )
     .bind(discord_id)
     .fetch_all(pool)
     .await?
-    .into_iter()
-    .collect();
+    {
+        user_batches.entry(guild_id).or_default().insert(batch_id);
+    }
+    let none: HashSet<i64> = HashSet::new();
 
     let existing: HashSet<(String, String)> = sqlx::query_as::<_, (String, String)>(
         "SELECT guild_id, role_id FROM role_assignments WHERE discord_id = $1",
@@ -92,7 +97,8 @@ pub async fn sync_for_player(discord_id: &str, state: &AppState) -> Result<(), A
     .await?;
 
     for (guild_id, role_id, api_token, conditions) in &role_links {
-        let qualifies = condition_eval::qualifies(&conditions.0, &user_batches);
+        let redeemed_here = user_batches.get(guild_id).unwrap_or(&none);
+        let qualifies = condition_eval::qualifies(&conditions.0, redeemed_here);
         let currently = existing.contains(&(guild_id.clone(), role_id.clone()));
         match (qualifies, currently) {
             (true, false) => {

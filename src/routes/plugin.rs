@@ -72,15 +72,34 @@ pub async fn get_config(
     let guild_id = link.0;
     let conditions = link.1 .0;
 
-    let batches = sqlx::query_as::<_, (i64, String)>(
-        "SELECT id, name FROM code_batches WHERE guild_id = $1 AND revoked_at IS NULL ORDER BY name ASC",
+    // Live groups, plus retired ones this role still has ticked: retiring a
+    // group keeps its members' role, and the dashboard only saves values it
+    // offers as options, so a ticked group has to stay listed (labelled).
+    let mut batches = sqlx::query_as::<_, (i64, String, bool)>(
+        "SELECT id, name, revoked_at IS NOT NULL FROM code_batches \
+         WHERE guild_id = $1 AND (revoked_at IS NULL OR id = ANY($2)) \
+         ORDER BY revoked_at IS NOT NULL, name ASC",
     )
     .bind(&guild_id)
+    .bind(&conditions.approved_batch_ids[..])
     .fetch_all(&state.pool)
     .await?
     .into_iter()
-    .map(|(id, name)| BatchSummary { id, name })
+    .map(|(id, name, retired)| BatchSummary { id, name, retired })
     .collect::<Vec<_>>();
+    // The picker holds at most 100 options: never drop a ticked group.
+    if batches.len() > 100 {
+        let ticked = conditions.approved_batch_ids.clone();
+        let room = 100usize.saturating_sub(batches.iter().filter(|b| ticked.contains(&b.id)).count());
+        let mut others = 0usize;
+        batches.retain(|b| {
+            if ticked.contains(&b.id) {
+                return true;
+            }
+            others += 1;
+            others <= room
+        });
+    }
 
     let schema = schema::build_config_schema(&guild_id, &conditions, &batches, &state.config.base_url);
 

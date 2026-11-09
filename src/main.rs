@@ -30,6 +30,10 @@ pub struct AppState {
     pub http: reqwest::Client,
     pub verify_html: bytes::Bytes,
     pub admin_html: bytes::Bytes,
+    /// Server names the admin page shows, with when each was fetched
+    /// (routes::admin::guild_name).
+    pub guild_names:
+        std::sync::Mutex<std::collections::HashMap<String, (Option<String>, std::time::Instant)>>,
 }
 
 #[tokio::main]
@@ -73,6 +77,7 @@ async fn main() {
         http,
         verify_html,
         admin_html,
+        guild_names: std::sync::Mutex::new(std::collections::HashMap::new()),
     });
 
     tokio::spawn(tasks::player_sync_worker::run(
@@ -114,6 +119,14 @@ async fn main() {
                 .route(
                     "/admin/api/batches/{id}/redemptions",
                     get(routes::admin::list_redemptions),
+                )
+                .route(
+                    "/admin/api/batches/{id}/codes.csv",
+                    get(routes::admin::codes_csv),
+                )
+                .route(
+                    "/admin/api/batches/{id}/redemptions.csv",
+                    get(routes::admin::redemptions_csv),
                 )
                 .route("/admin/api/codes/{id}", delete(routes::admin::revoke_code))
                 .route("/admin/api/codes/{id}/qr.svg", get(routes::admin::code_qr))

@@ -334,6 +334,12 @@ async function api(method, path, body) {{
   const res = await fetch(BASE + path, opts);
   let data = {{}};
   try {{ data = await res.json(); }} catch(e) {{}}
+  // A sign-in that ran out mid-visit: back to the sign-in button.
+  if (res.status === 401 && path !== '/verify/status') {{
+    show('login');
+    throw new Error('Your sign-in has expired. Sign in again, then enter your code.');
+  }}
+  if (res.status === 429) throw new Error('Too many tries in the last hour. Wait a while, then try again.');
   if (!res.ok) throw new Error(data.error || 'Request failed');
   return data;
 }}
@@ -417,6 +423,7 @@ const ERROR_TEXT = {{
   exhausted: 'This code campaign has hit its redemption limit.',
   already_used: 'Looks like that code has already been claimed by someone else.',
   already_redeemed_by_you: 'You\'ve already redeemed this code — your role is set.',
+  already_claimed_in_group: 'You\'ve already claimed a code from this group. It\'s one per person — your role is set.',
   ambiguous_code: 'More than one server uses this code. Open the redeem link from the server that gave it to you, or join that server on Discord first and try again.',
 }};
 
@@ -431,9 +438,12 @@ async function doRedeem() {{
     const r = await api('POST', '/verify/redeem', {{ code: raw, guild_id: guildId || undefined }});
     if (r.success) {{
       const groupBit = r.batch_name ? ' from "' + r.batch_name + '"' : '';
-      const note = r.pending
-        ? ' You\'re not in the Discord server yet — join it and your role will be assigned automatically.'
-        : ' Your role should appear in Discord within a few seconds.';
+      // role_ready false: no role in that server has this group ticked yet.
+      const note = r.role_ready === false
+        ? ' The server hasn\'t switched this code group on for a role yet. Your redemption is saved, and the role arrives on its own once they do.'
+        : r.pending
+          ? ' You\'re not in the Discord server yet — join it and your role will be assigned automatically.'
+          : ' Your role should appear in Discord within a few seconds.';
       const expBit = r.role_expires_at
         ? ' This role lasts until ' + new Date(r.role_expires_at).toLocaleString() + '.'
         : '';
@@ -482,6 +492,8 @@ async function doRefresh() {{
     applyStatus(s);
     if (!s.pending_redemptions || !s.pending_redemptions.length) {{
       showMsg('All set — your role has been assigned.', 'success');
+      // They've joined: the banner that said they weren't in the server is stale.
+      applyGuildContext();
     }} else {{
       showMsg('Still not seeing you in the server. If you just joined, give it a few more seconds and try again.', 'info');
     }}
@@ -507,6 +519,7 @@ function startPollingIfPending(items) {{
       applyStatus(s);
       if (!s.pending_redemptions || !s.pending_redemptions.length) {{
         clearInterval(POLL_TIMER); POLL_TIMER = null;
+        applyGuildContext();
       }}
     }} catch(e) {{}}
   }}, 10000);
@@ -540,16 +553,25 @@ function renderRecent(items) {{
   wrap.innerHTML = html;
 }}
 
+// The first signed-in status of this visit fills in the link's code and
+// applies the link's server; later ones (after a redeem, the 10-second
+// checks while a role waits) must not put the code back or overwrite what
+// the member is typing.
+let SIGNED_IN_ONCE = false;
+
 function applyStatus(s) {{
   if (s.logged_in) {{
     document.getElementById('username').textContent = s.display_name || s.discord_id;
     show('redeem');
-    if (PRESET_CODE) document.getElementById('code-input').value = PRESET_CODE;
     renderRecent(s.recent_redemptions || []);
     renderPending(s.pending_redemptions || []);
     startPollingIfPending(s.pending_redemptions || []);
-    // Session is valid — apply per-guild side effects (banner + opt-out clear).
-    applyGuildContext();
+    if (!SIGNED_IN_ONCE) {{
+      SIGNED_IN_ONCE = true;
+      if (PRESET_CODE) document.getElementById('code-input').value = PRESET_CODE;
+      // Session is valid — apply per-guild side effects (banner + opt-out clear).
+      applyGuildContext();
+    }}
   }} else {{
     show('login');
   }}

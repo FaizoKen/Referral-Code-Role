@@ -25,10 +25,10 @@ Built for scale: the Role Link sync path supports **100 000+ members per role li
                               GET /register, /config ◀──────────┘
 ```
 
-1. An admin creates a **code group** (a batch with rules: per-code caps, per-user caps, expiry, optional role duration, optional Discord invite link).
-2. The admin generates codes (random or custom). Each code has a share URL and a downloadable QR.
+1. An admin creates a **code group** (a batch with rules: its type, an optional total redemption cap, expiry, role duration and Discord invite link). Groups can be edited later; their type can't.
+2. The admin generates codes (random or custom). Each code has a share URL and a downloadable QR; a group's codes and its redemptions also download as CSV.
 3. A member opens the share URL, signs in through the Auth Gateway (Discord OAuth), enters a code.
-4. The plugin validates the code, records the redemption, and pushes the updated member list to the RoleLogic API so the bot grants the role.
+4. The plugin validates the code, records the redemption, and pushes the updated member list to the RoleLogic API so the bot grants the role. A group gives a role only once it is ticked in that role's settings in the RoleLogic dashboard; the admin page flags groups no role has ticked.
 
 Codes can be **time-limited** — if a batch has `role_duration_hours` set, the role is automatically revoked when it expires (a background worker sweeps every 60s).
 
@@ -38,9 +38,13 @@ Codes can be **time-limited** — if a batch has `role_duration_hours` set, the 
 
 | Kind | Behavior |
 |------|----------|
-| `unique_per_code` | Each code can be used once, by one user. |
-| `unique_per_user` | Each code can be used up to `max_redemptions_per_code` times, but only once per user. |
-| `shared_unlimited` | One code, many users — until the batch `max_redemptions_total` or `expires_at` is hit. |
+| `unique_per_code` | "One-time codes": each code can be used once, by one user. |
+| `unique_per_user` | "Per-person codes": a code can be used by many people (print one on every wristband), but each person redeems **once per group**, whichever of its codes they hold. (`max_redemptions_per_code` still caps a code when set through the API.) |
+| `shared_unlimited` | "Single shared code": one code, many users, once each — until the batch `max_redemptions_total` or `expires_at` is hit. |
+
+The limits are checked again inside the redeem's transaction with the code's row (and, for a cap or per-person group, the group's row) locked, so two people can't both take the last use.
+
+Retiring a group stops its codes; people who already redeemed keep the role. A retired group a role still has ticked stays in that role's picker, labelled "(retired)", so its settings still save (the dashboard only saves values it offers).
 
 ---
 
@@ -63,9 +67,11 @@ All routes are nested under the plugin slug `/referral-code-role`.
 | `GET`  | `/admin` | Admin single-page UI |
 | `GET`  | `/admin/api/stats` | Guild summary |
 | `GET` `POST` | `/admin/api/batches` | List / create code groups |
-| `PATCH` `DELETE` | `/admin/api/batches/:id` | Update / revoke a group |
+| `PATCH` `DELETE` | `/admin/api/batches/:id` | Update (`null` clears a field) / retire a group |
 | `GET` `POST` | `/admin/api/batches/:id/codes` | List / generate codes |
-| `GET`  | `/admin/api/batches/:id/redemptions` | Redemption history |
+| `GET`  | `/admin/api/batches/:id/redemptions` | Redemption history (names, role end times) |
+| `GET`  | `/admin/api/batches/:id/codes.csv` | Every code with its redemption link |
+| `GET`  | `/admin/api/batches/:id/redemptions.csv` | Everyone who redeemed |
 | `DELETE` | `/admin/api/codes/:id` | Revoke a single code |
 | `GET`  | `/admin/api/codes/:id/qr.svg` | Code QR as SVG |
 
@@ -144,7 +150,7 @@ Migrations live in [migrations/](migrations/). High level:
 - `role_links` — one row per (guild, role) registered via `/register`; stores the API token and the conditions JSON.
 - `code_batches` — admin-created code groups with kind / caps / expiry / optional `role_duration_hours` / optional `invite_url`.
 - `codes` — individual redeemable codes inside a batch.
-- `redemptions` — who redeemed what, when; also tracks `pending` (redeemed before joining the guild) and `role_expires_at` / `role_revoked_at` for time-limited roles.
+- `redemptions` — who redeemed what, when (with their Discord display name at the time); also tracks `pending` (redeemed before joining the guild) and `role_expires_at` / `role_revoked_at` for time-limited roles.
 - `redemption_attempts` — rate-limit log (success and failure).
 - `role_assignments` — local mirror of who holds each role, used for diffing.
 - `oauth_states` — short-lived CSRF tokens for the sign-in flow.

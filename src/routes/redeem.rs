@@ -69,6 +69,88 @@ type Candidate = (
     Option<i32>,           // batch.role_duration_hours
 );
 
+/// What a group's limits need to know about one more redemption of one of
+/// its codes, by someone who hasn't redeemed that code before.
+#[derive(Debug, Clone, Copy)]
+struct Usage<'a> {
+    kind: &'a str,
+    /// Redemptions of this code so far.
+    uses: i32,
+    per_code_cap: Option<i32>,
+    total_cap: Option<i32>,
+    /// Redemptions in the whole group so far (read only when it has a cap).
+    total: i64,
+    /// This member has already redeemed some code in the group.
+    claimed_in_group: bool,
+}
+
+/// Which of a group's limits one more redemption would break, if any. Pure,
+/// so the redeem path asks it twice: once to choose a code, and again inside
+/// the transaction with counts read under a lock.
+///
+/// - One-time codes: a code works once, for one person.
+/// - Per-person codes: a code works for many people, but each person once
+///   across the whole group (their second wristband code is refused).
+/// - Single shared code: anyone, once each, until the group's cap.
+fn limit_reason(u: &Usage) -> Option<&'static str> {
+    if u.kind == "unique_per_user" && u.claimed_in_group {
+        return Some("already_claimed_in_group");
+    }
+    if let Some(cap) = u.total_cap {
+        if u.total >= cap as i64 {
+            return Some("exhausted");
+        }
+    }
+    if u.kind == "unique_per_code" && u.uses >= 1 {
+        return Some("already_used");
+    }
+    if matches!(u.kind, "unique_per_code" | "unique_per_user") {
+        if let Some(per_cap) = u.per_code_cap {
+            if u.uses >= per_cap {
+                return Some("already_used");
+            }
+        }
+    }
+    None
+}
+
+/// Reads what [`limit_reason`] needs. `uses` is passed in because the
+/// transaction reads it under its own row lock.
+async fn usage<'a>(
+    conn: &mut sqlx::PgConnection,
+    cand: &'a Candidate,
+    uses: i32,
+    discord_id: &str,
+) -> Result<Usage<'a>, AppError> {
+    let total: i64 = if cand.7.is_some() {
+        sqlx::query_scalar("SELECT COUNT(*) FROM redemptions WHERE batch_id = $1")
+            .bind(cand.1)
+            .fetch_one(&mut *conn)
+            .await?
+    } else {
+        0
+    };
+    let claimed_in_group: bool = if cand.5 == "unique_per_user" {
+        sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM redemptions WHERE batch_id = $1 AND discord_id = $2)",
+        )
+        .bind(cand.1)
+        .bind(discord_id)
+        .fetch_one(&mut *conn)
+        .await?
+    } else {
+        false
+    };
+    Ok(Usage {
+        kind: cand.5.as_str(),
+        uses,
+        per_code_cap: cand.6,
+        total_cap: cand.7,
+        total,
+        claimed_in_group,
+    })
+}
+
 /// Why `discord_id` can't redeem `cand` right now, or `None` if they can.
 async fn unusable_reason(
     state: &AppState,
@@ -76,6 +158,19 @@ async fn unusable_reason(
     discord_id: &str,
     now: DateTime<Utc>,
 ) -> Result<Option<&'static str>, AppError> {
+    let mut conn = state.pool.acquire().await?;
+    // Someone typing a code they already redeemed hears that, whatever else
+    // is true of the code now (used up, retired, expired): their role is set.
+    let already: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM redemptions WHERE code_id = $1 AND discord_id = $2)",
+    )
+    .bind(cand.0)
+    .bind(discord_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if already {
+        return Ok(Some("already_redeemed_by_you"));
+    }
     if cand.3.is_some() {
         return Ok(Some("invalid"));
     }
@@ -84,36 +179,25 @@ async fn unusable_reason(
             return Ok(Some("expired"));
         }
     }
-    if let Some(cap) = cand.7 {
-        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM redemptions WHERE batch_id = $1")
-            .bind(cand.1)
-            .fetch_one(&state.pool)
-            .await?;
-        if total >= cap as i64 {
-            return Ok(Some("exhausted"));
-        }
-    }
-    if cand.5 == "unique_per_code" && cand.2 >= 1 {
-        return Ok(Some("already_used"));
-    }
-    if matches!(cand.5.as_str(), "unique_per_code" | "unique_per_user") {
-        if let Some(per_cap) = cand.6 {
-            if cand.2 >= per_cap {
-                return Ok(Some("already_used"));
-            }
-        }
-    }
-    let already: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM redemptions WHERE code_id = $1 AND discord_id = $2)",
+    let u = usage(&mut conn, cand, cand.2, discord_id).await?;
+    Ok(limit_reason(&u))
+}
+
+/// How many of a server's role links have this group ticked: 0 means a
+/// redeem is recorded but gives no role until an admin ticks the group.
+pub async fn approving_role_links(
+    pool: &sqlx::PgPool,
+    guild_id: &str,
+    batch_id: i64,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM role_links \
+         WHERE guild_id = $1 AND conditions->'approved_batch_ids' @> jsonb_build_array($2::bigint)",
     )
-    .bind(cand.0)
-    .bind(discord_id)
-    .fetch_one(&state.pool)
-    .await?;
-    if already {
-        return Ok(Some("already_redeemed_by_you"));
-    }
-    Ok(None)
+    .bind(guild_id)
+    .bind(batch_id)
+    .fetch_one(pool)
+    .await
 }
 
 fn guild_ids(cands: &[Candidate]) -> Vec<&str> {
@@ -146,9 +230,10 @@ pub async fn redeem_code(
     Json(body): Json<RedeemBody>,
 ) -> Result<Json<Value>, AppError> {
     let cookie = jar.get(SESSION_COOKIE).ok_or(AppError::Unauthorized)?;
-    let (discord_id, _display_name) =
+    let (discord_id, display_name) =
         session::verify_session(cookie.value(), &state.config.session_secret)
             .ok_or(AppError::Unauthorized)?;
+    let display_name = Some(display_name.trim().to_string()).filter(|n| !n.is_empty());
 
     let ip = extract_ip(&headers);
     let ip_hash = ip.as_deref().map(hash_ip);
@@ -298,10 +383,37 @@ pub async fn redeem_code(
 
     // Atomic insert + counter bump.
     let mut tx = state.pool.begin().await?;
+
+    // The checks above ran outside this transaction, so two people redeeming
+    // the last use of a one-time code (or the last place under a group's cap,
+    // or one member redeeming two wristband codes at once) could both pass
+    // them. Lock the code's row, and the group's row when a group-wide limit
+    // applies, then check again against what is committed now. Code first,
+    // group second, always: two redeems never wait on each other in opposite
+    // orders. NO KEY UPDATE leaves the foreign-key checks of other inserts
+    // into the group unblocked.
+    let uses: i32 =
+        sqlx::query_scalar("SELECT uses_count FROM codes WHERE id = $1 FOR NO KEY UPDATE")
+            .bind(cand.0)
+            .fetch_one(&mut *tx)
+            .await?;
+    if cand.7.is_some() || cand.5 == "unique_per_user" {
+        sqlx::query("SELECT 1 FROM code_batches WHERE id = $1 FOR NO KEY UPDATE")
+            .bind(cand.1)
+            .execute(&mut *tx)
+            .await?;
+    }
+    let locked = usage(&mut tx, cand, uses, &discord_id).await?;
+    if let Some(reason) = limit_reason(&locked) {
+        tx.rollback().await?;
+        record_attempt(&state, &discord_id, ip_hash.as_deref(), &normalized, false).await?;
+        return Ok(Json(json!({"error": reason})));
+    }
+
     let insert_res = sqlx::query(
         "INSERT INTO redemptions \
-            (code_id, batch_id, guild_id, discord_id, ip_hash, user_agent, pending, role_expires_at) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (code_id, discord_id) DO NOTHING",
+            (code_id, batch_id, guild_id, discord_id, ip_hash, user_agent, pending, role_expires_at, display_name) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (code_id, discord_id) DO NOTHING",
     )
     .bind(cand.0)
     .bind(cand.1)
@@ -311,6 +423,7 @@ pub async fn redeem_code(
     .bind(&user_agent)
     .bind(pending)
     .bind(role_expires_at)
+    .bind(&display_name)
     .execute(&mut *tx)
     .await?;
 
@@ -335,6 +448,14 @@ pub async fn redeem_code(
         })
         .await;
 
+    // A group nobody has ticked in a role's settings records the redeem but
+    // gives no role yet; say so instead of promising one. (If the lookup
+    // fails, assume ticked: that was the page's only message before.)
+    let role_ready = approving_role_links(&state.pool, &cand.4, cand.1)
+        .await
+        .map(|n| n > 0)
+        .unwrap_or(true);
+
     Ok(Json(json!({
         "success": true,
         "batch_name": cand.10,
@@ -342,6 +463,7 @@ pub async fn redeem_code(
         "pending": pending,
         "invite_url": cand.11,
         "role_expires_at": role_expires_at,
+        "role_ready": role_ready,
     })))
 }
 
@@ -394,6 +516,58 @@ mod tests {
             member_guilds_mask(&["A", "B"], &ids(&["A", "B"])),
             [true, true]
         );
+    }
+
+    fn fresh(kind: &str) -> Usage<'_> {
+        Usage {
+            kind,
+            uses: 0,
+            per_code_cap: None,
+            total_cap: None,
+            total: 0,
+            claimed_in_group: false,
+        }
+    }
+
+    #[test]
+    fn a_one_time_code_works_once() {
+        assert_eq!(limit_reason(&fresh("unique_per_code")), None);
+        let used = Usage { uses: 1, ..fresh("unique_per_code") };
+        assert_eq!(limit_reason(&used), Some("already_used"));
+        // A second one-time code from the same group is a different reward.
+        let other = Usage { claimed_in_group: true, ..fresh("unique_per_code") };
+        assert_eq!(limit_reason(&other), None);
+    }
+
+    #[test]
+    fn per_person_codes_are_shared_but_once_per_person_per_group() {
+        // The wristband code has been used by forty people: still fine.
+        let busy = Usage { uses: 40, ..fresh("unique_per_user") };
+        assert_eq!(limit_reason(&busy), None);
+        // This member already redeemed one of the group's codes (any of them).
+        let again = Usage { uses: 40, claimed_in_group: true, ..fresh("unique_per_user") };
+        assert_eq!(limit_reason(&again), Some("already_claimed_in_group"));
+        // A per-code cap still applies when a group carries one.
+        let capped = Usage { uses: 5, per_code_cap: Some(5), ..fresh("unique_per_user") };
+        assert_eq!(limit_reason(&capped), Some("already_used"));
+    }
+
+    #[test]
+    fn a_shared_code_runs_until_the_group_cap() {
+        let open = Usage { uses: 99, total: 99, total_cap: Some(100), ..fresh("shared_unlimited") };
+        assert_eq!(limit_reason(&open), None);
+        let full = Usage { total: 100, ..open };
+        assert_eq!(limit_reason(&full), Some("exhausted"));
+        // A shared code has no per-person-per-group rule: the same person on
+        // a second shared code of the group is allowed (each code once).
+        let second = Usage { claimed_in_group: true, ..fresh("shared_unlimited") };
+        assert_eq!(limit_reason(&second), None);
+    }
+
+    #[test]
+    fn a_member_who_already_claimed_hears_that_before_the_cap() {
+        let both = Usage { total: 100, total_cap: Some(100), claimed_in_group: true, ..fresh("unique_per_user") };
+        assert_eq!(limit_reason(&both), Some("already_claimed_in_group"));
     }
 
     #[test]
